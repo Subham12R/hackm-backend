@@ -114,7 +114,7 @@ Admin, prefix `/api/v1/admin`, admin role required:
 
 The image is `ghcr.io/subham12r/hackm-backend`. A push to `master` builds it and restarts the container on the VPS. Host ports `8000`, `8080`, `8082`, and `8091` are already taken, so nginx reaches this API at `127.0.0.1:8092`.
 
-Create the VPS database and `~/hackm-backend/.env` once. Point `DATABASE_URL` at the host Postgres with `host.docker.internal`, not `127.0.0.1`. Store PEM values with literal `\n`. Then install `deploy/nginx/hackmatrix-api.conf` and reload nginx.
+HackMatrix Postgres runs as its own container, `hackm-postgres`, with no host port. SecureMail keeps `127.0.0.1:5432`. In `/opt/apps/hackm-backend/.env`, set `POSTGRES_PASSWORD` and `DATABASE_URL=postgresql+psycopg://hackm:<same-password>@db:5432/hackm`. Store PEM values with literal `\n`. Then install `deploy/nginx/hackmatrix-api.conf` and reload nginx.
 
 ## Tests
 

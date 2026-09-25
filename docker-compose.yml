@@ -1,4 +1,20 @@
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: hackm-postgres
+    environment:
+      POSTGRES_USER: hackm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: hackm
+    volumes:
+      - hackm-postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hackm -d hackm"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     image: ghcr.io/subham12r/hackm-backend:latest
     container_name: hackm-backend
@@ -6,6 +22,10 @@ services:
       - "127.0.0.1:8092:8000"
     env_file:
       - .env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  hackm-postgres:
