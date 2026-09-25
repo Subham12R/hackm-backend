@@ -47,12 +47,12 @@ def test_admin_can_list_registrations_and_participant_cannot() -> None:
     client = TestClient(app)
     admin_token = client.post("/api/v1/auth/login", json={"email": admin_email, "password": "password", "portal": "admin"}).json()["tokens"]["access_token"]
     leader_token = client.post("/api/v1/auth/login", json={"email": leader_email, "password": "password", "portal": "participant"}).json()["tokens"]["access_token"]
-    listed = client.get("/api/v1/admin/registrations", headers={"Authorization": f"Bearer {admin_token}"})
+    listed = client.get("/api/v1/admin/registrations?page_size=100", headers={"Authorization": f"Bearer {admin_token}"})
     denied = client.get("/api/v1/admin/registrations", headers={"Authorization": f"Bearer {leader_token}"})
 
     assert denied.status_code == 403
     assert listed.status_code == 200
-    row = next(item for item in listed.json()["registrations"] if item["email"] == leader_email)
-    assert row["status"] == "PAID"
+    row = next(item for item in listed.json()["items"] if item["email"] == leader_email)
+    assert row["registration_status"] == "PAID"
     assert row["amount_minor"] == 20000
     assert row["category"] == "Adamas ACM"

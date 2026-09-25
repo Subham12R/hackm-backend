@@ -29,6 +29,9 @@ class Registration(Base):
     pricing_tier: Mapped[str] = mapped_column(String(40))
     verification_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
     verification_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    details_review_status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    details_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    details_reviewed_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
