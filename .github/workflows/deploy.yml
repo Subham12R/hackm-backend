@@ -42,7 +42,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           source: docker-compose.yml
-          target: ~/hackm-backend
+          target: /opt/apps/hackm-backend
 
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.2.2
@@ -52,8 +52,8 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           script: |
-            cd ~/hackm-backend
-            test -f .env || { echo "missing ~/hackm-backend/.env"; exit 1; }
+            cd /opt/apps/hackm-backend
+            test -f .env || { echo "missing /opt/apps/hackm-backend/.env"; exit 1; }
             docker compose pull
             docker compose up -d --remove-orphans
             docker image prune -f
