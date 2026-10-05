@@ -3,7 +3,7 @@ import logging
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
-from uuid import UUID
+from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from pydantic import AfterValidator, BaseModel, EmailStr, Field, StringConstraints, model_validator
@@ -13,8 +13,9 @@ from sqlalchemy.orm import Session
 
 from src.auth.rate_limits import is_limited
 from src.communications.outbox import dispatch_pending
-from src.db.models.registration import Event, PaymentOrder, PaymentWebhookEvent, Registration, RegistrationMember
+from src.db.models.registration import PaymentOrder, PaymentWebhookEvent, Registration, RegistrationMember
 from src.db.session import create_db_engine
+from src.events.service import ACTIVE_EVENT_ID, current_event
 from src.events.windows import ensure_window_open
 from src.payments import service as payments
 from src.payments.providers.razorpay import create_order, verify_webhook_signature
@@ -22,7 +23,6 @@ from src.registrations.pricing import calculate_registration_price, registration
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-ACTIVE_EVENT_ID = UUID("00000000-0000-4000-8000-000000000001")
 # A fresh unpaid registration holds its member emails; after this it can be replaced or reused.
 PENDING_HOLD = timedelta(hours=24)
 # A pending order is never replaced while a checkout may still be open on it.
@@ -105,74 +105,64 @@ def create_registration(payload: RegistrationRequest, request: Request):
     leader_email = leaders[0].email.lower()
     team_name = " ".join(payload.team_name.split())
     now = datetime.now(UTC)
+
+    # Phase 1, no event lock: rate limit, settle the leader's existing unpaid registration with the
+    # provider, and decide whether it is reused, blocked, or replaced. Network calls happen here only.
     with _session(request) as session:
         # Keyed by leader email: behind the frontend BFF every request shares one client IP.
         if is_limited(session, f"registration:{leader_email}", now, 10, timedelta(hours=1)):
             session.commit()
             raise HTTPException(429, "too many registration attempts")
         session.commit()
-        # Serialize registrations for the event so the uniqueness checks below cannot race.
-        event = session.get(Event, ACTIVE_EVENT_ID, with_for_update=True)
-        if event is None:
-            raise HTTPException(503, "event is not configured")
-        ensure_window_open(event, "registration", now)
-
-        same_name = session.scalar(select(Registration).where(
-            Registration.event_id == event.id, func.lower(Registration.team_name) == team_name.lower(),
-            Registration.status.in_(payments.ACTIVE_STATUSES),
-        ))
-        leader_active = session.scalar(select(Registration).where(
-            Registration.event_id == event.id, Registration.leader_email == leader_email,
-            Registration.status.in_(payments.ACTIVE_STATUSES),
-        ))
-        if same_name is not None and (same_name.leader_email != leader_email or same_name.status == "PAID"):
-            raise HTTPException(409, "team name is already registered")
-        if leader_active is not None and leader_active.status == "PAID":
-            raise HTTPException(409, "this leader email already has a paid registration")
-
-        if leader_active is not None:
-            order = session.scalar(select(PaymentOrder).where(
-                PaymentOrder.registration_id == leader_active.id, PaymentOrder.purpose == payments.REGISTRATION,
-                PaymentOrder.status.in_(("CREATED", "CAPTURED")),
-            ).order_by(PaymentOrder.created_at.desc()))
+        ensure_window_open(current_event(session), "registration", now)
+        _raise_conflicts(session, team_name, leader_email, emails, now, replacing=None)
+        pending = _leader_registration(session, leader_email, lock=True)
+        replacing = None
+        if pending is not None:
+            order = _latest_registration_order(session, pending.id, lock=True)
             if order is not None:
                 payments.reconcile_order(session, api, order, force=True)
                 session.flush()
                 if order.status == "CAPTURED":
                     session.commit()
                     raise HTTPException(409, "this leader email already has a paid registration")
-            saved = payments.registration_members(session, leader_active.id)
-            unchanged = (
-                order is not None and order.status == "CREATED" and leader_active.team_name == team_name
-                and order.amount_minor == price.amount_paise
-                and {_member_key(m) for m in payload.members} == {_member_key(m) for m in saved}
-            )
-            if unchanged:
+            saved = payments.registration_members(session, pending.id)
+            if (order is not None and order.status == "CREATED" and pending.team_name == team_name
+                    and order.amount_minor == price.amount_paise
+                    and {_member_key(m) for m in payload.members} == {_member_key(m) for m in saved}):
                 session.commit()
-                return _checkout(order, leader_active, request)
+                return _checkout(order, pending, request)
             if order is not None and (order.created_at + REPLACE_AFTER > now or payments.provider_has_live_payment(api, order)):
                 session.commit()
                 raise HTTPException(409, "registration already pending; finish that payment or try again in 30 minutes")
-            # Unpaid and idle: retire it so the leader can register with corrected details.
-            leader_active.status = "ABANDONED"
-            for stale in session.scalars(select(PaymentOrder).where(PaymentOrder.registration_id == leader_active.id, PaymentOrder.status == "CREATED")):
+            replacing = pending.id
+        session.commit()
+
+    # The provider order is created before any lock is taken. If the checks below fail, the order is
+    # simply never paid; a payment on it would be recorded for review, never lost.
+    registration_id = uuid4()
+    try:
+        created = create_order(api, price.amount_paise, str(registration_id), {"purpose": payments.REGISTRATION})
+    except Exception:
+        logger.exception("razorpay order creation failed")
+        raise HTTPException(502, "payment provider is unavailable") from None
+
+    # Phase 2, under the event lock: re-check everything (state may have moved) and write atomically.
+    with _session(request) as session:
+        event = current_event(session, lock=True)
+        ensure_window_open(event, "registration", now)
+        _raise_conflicts(session, team_name, leader_email, emails, now, replacing=replacing)
+        pending = _leader_registration(session, leader_email, lock=True)
+        if pending is not None:
+            if pending.id != replacing:
+                raise HTTPException(409, "registration already pending; finish that payment or try again in 30 minutes")
+            # Retire the unpaid registration the leader is correcting.
+            pending.status = "ABANDONED"
+            for stale in session.scalars(select(PaymentOrder).where(PaymentOrder.registration_id == pending.id, PaymentOrder.status == "CREATED")):
                 stale.status = "CANCELLED"
             session.flush()
-
-        conflict = session.scalar(
-            select(RegistrationMember.email_normalized)
-            .join(Registration, Registration.id == RegistrationMember.registration_id)
-            .where(
-                Registration.event_id == event.id,
-                RegistrationMember.email_normalized.in_(emails),
-                (Registration.status == "PAID") | ((Registration.status == "PAYMENT_PENDING") & (Registration.created_at > now - PENDING_HOLD)),
-            )
-        )
-        if conflict is not None:
-            raise HTTPException(409, "a member is already part of another team")
-
         registration = Registration(
-            event_id=event.id, team_name=team_name, leader_email=leader_email, status="PAYMENT_PENDING",
+            id=registration_id, event_id=event.id, team_name=team_name, leader_email=leader_email, status="PAYMENT_PENDING",
             quoted_amount_minor=price.amount_paise, effective_amount_minor=price.amount_paise, pricing_tier=price.tier,
             category=registration_category(price.tier, leaders[0].college).value,
         )
@@ -186,11 +176,6 @@ def create_registration(payload: RegistrationRequest, request: Request):
                 acm_review_status="PENDING" if member.is_acm_member else "NOT_APPLICABLE",
             ) for member in payload.members
         )
-        try:
-            created = create_order(api, price.amount_paise, str(registration.id), {"purpose": payments.REGISTRATION})
-        except Exception:
-            logger.exception("razorpay order creation failed")
-            raise HTTPException(502, "payment provider is unavailable") from None
         order = PaymentOrder(
             registration_id=registration.id, provider_order_id=created["id"], amount_minor=price.amount_paise,
             currency="INR", status="CREATED", purpose=payments.REGISTRATION, created_at=now,
@@ -201,6 +186,47 @@ def create_registration(payload: RegistrationRequest, request: Request):
         except IntegrityError:
             raise HTTPException(409, "team name is already registered") from None
         return _checkout(order, registration, request)
+
+
+def _leader_registration(session: Session, leader_email: str, lock: bool = False) -> Registration | None:
+    query = select(Registration).where(
+        Registration.event_id == ACTIVE_EVENT_ID, Registration.leader_email == leader_email, Registration.status == "PAYMENT_PENDING",
+    )
+    return session.scalar(query.with_for_update() if lock else query)
+
+
+def _latest_registration_order(session: Session, registration_id, lock: bool = False) -> PaymentOrder | None:
+    query = select(PaymentOrder).where(
+        PaymentOrder.registration_id == registration_id, PaymentOrder.purpose == payments.REGISTRATION,
+        PaymentOrder.status.in_(("CREATED", "CAPTURED")),
+    ).order_by(PaymentOrder.created_at.desc()).limit(1)
+    return session.scalar(query.with_for_update() if lock else query)
+
+
+def _raise_conflicts(session: Session, team_name: str, leader_email: str, emails: list[str], now: datetime, replacing) -> None:
+    """Conflicts no correction can fix: someone else's team name, a paid leader, a member held by another team."""
+    same_name = session.scalar(select(Registration).where(
+        Registration.event_id == ACTIVE_EVENT_ID, func.lower(Registration.team_name) == team_name.lower(),
+        Registration.status.in_(payments.ACTIVE_STATUSES),
+    ))
+    if same_name is not None and (same_name.leader_email != leader_email or same_name.status == "PAID"):
+        raise HTTPException(409, "team name is already registered")
+    if session.scalar(select(Registration.id).where(
+        Registration.event_id == ACTIVE_EVENT_ID, Registration.leader_email == leader_email, Registration.status == "PAID",
+    )) is not None:
+        raise HTTPException(409, "this leader email already has a paid registration")
+    conflict = session.scalar(
+        select(RegistrationMember.email_normalized)
+        .join(Registration, Registration.id == RegistrationMember.registration_id)
+        .where(
+            Registration.event_id == ACTIVE_EVENT_ID,
+            Registration.leader_email != leader_email,
+            RegistrationMember.email_normalized.in_(emails),
+            (Registration.status == "PAID") | ((Registration.status == "PAYMENT_PENDING") & (Registration.created_at > now - PENDING_HOLD)),
+        )
+    )
+    if conflict is not None:
+        raise HTTPException(409, "a member is already part of another team")
 
 
 @router.get("/api/v1/registrations/payment-status")

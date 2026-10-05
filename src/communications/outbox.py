@@ -24,17 +24,22 @@ def queue_email(session: Session, recipient: str, subject: str, html: str) -> Em
 
 
 def dispatch_pending(database_url: str, sender, limit: int = 25) -> int:
-    """Send due messages; safe to run concurrently because rows are claimed with SKIP LOCKED."""
+    """Send due messages one at a time, committing each, so a failure never resends earlier ones.
+
+    Each row is claimed with SKIP LOCKED, so concurrent dispatchers never send the same message.
+    """
     sent = 0
     with Session(create_db_engine(database_url)) as session:
-        due = session.scalars(
-            select(EmailOutbox)
-            .where(EmailOutbox.status == "PENDING", EmailOutbox.next_attempt_at <= datetime.now(UTC))
-            .order_by(EmailOutbox.created_at)
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-        ).all()
-        for message in due:
+        for _ in range(limit):
+            message = session.scalar(
+                select(EmailOutbox)
+                .where(EmailOutbox.status == "PENDING", EmailOutbox.next_attempt_at <= datetime.now(UTC))
+                .order_by(EmailOutbox.created_at)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            )
+            if message is None:
+                break
             message.attempts += 1
             try:
                 result = sender.send(message.recipient, message.subject, message.html)
@@ -45,11 +50,12 @@ def dispatch_pending(database_url: str, sender, limit: int = 25) -> int:
                 else:
                     message.next_attempt_at = datetime.now(UTC) + timedelta(minutes=2 ** message.attempts)
                 logger.warning("email delivery failed for outbox %s", message.id)
+                session.commit()
                 continue
             message.status = "SENT"
             message.sent_at = datetime.now(UTC)
             if isinstance(result, dict) and result.get("id"):
                 message.provider_message_id = str(result["id"])[:120]
+            session.commit()
             sent += 1
-        session.commit()
     return sent

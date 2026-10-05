@@ -106,17 +106,21 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
     @router.post("/login")
     def login(payload: LoginRequest, request: Request):
         with Session(create_db_engine(request.app.state.database_url)) as session:
-            key = f"login:{payload.email.strip().lower()}"
+            email = payload.email.strip().lower()
+            # The BFF forwards the browser's address; it only narrows the tight per-client budget.
+            client = (request.headers.get("X-Client-IP") or (request.client.host if request.client else "unknown"))[:64]
+            limits = ((f"login:{email}:{client}", 5), (f"login:{email}", 30))
             now = datetime.now(UTC)
-            # Checked before the password so a correct guess after lockout is still refused.
-            if is_blocked(session, key, now, 5, timedelta(minutes=15)):
+            # Checked before the password so a correct guess after lockout is still refused. The
+            # per-account cap is high so locking someone else out takes sustained effort.
+            if any(is_blocked(session, key, now, limit, timedelta(minutes=15)) for key, limit in limits):
                 raise HTTPException(429, "too many login attempts")
             try:
                 user = authenticate(session, payload.email, payload.password, payload.portal)
             except AuthenticationError:
-                limited = is_limited(session, key, now, 5, timedelta(minutes=15))
+                limited = [is_limited(session, key, now, limit, timedelta(minutes=15)) for key, limit in limits]
                 session.commit()
-                if limited:
+                if any(limited):
                     raise HTTPException(429, "too many login attempts")
                 raise HTTPException(401, "invalid credentials") from None
             access, refresh = issue_tokens(session, user, private_key, "hackmatrix-api", "hackmatrix-bff")

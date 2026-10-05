@@ -66,7 +66,11 @@ def test_upgrade_preserves_paid_teams_resolves_pending_duplicates_and_moves_scor
         ), {"id": uuid4(), "reg": paid, "judge": judge})
         connection.execute(text(
             "INSERT INTO evaluations (id, registration_id, round, innovation, technical, problem_solving, ui_ux, completeness, evaluated_by_user_id, evaluated_at) "
-            "VALUES (:id, :reg, 'round-1', 8, 7, 6, 5, 4, :judge, now())"
+            "VALUES (:id, :reg, 'round-1', 8, 7, 6, 5, 4, :judge, now() - interval '1 hour')"
+        ), {"id": uuid4(), "reg": paid, "judge": judge})
+        connection.execute(text(
+            "INSERT INTO evaluations (id, registration_id, round, innovation, technical, problem_solving, ui_ux, completeness, evaluated_by_user_id, evaluated_at) "
+            "VALUES (:id, :reg, 'finals', 9, 9, 9, 9, 9, :judge, now())"
         ), {"id": uuid4(), "reg": paid, "judge": judge})
 
     command.upgrade(_config(scratch_url), "head")
@@ -79,9 +83,16 @@ def test_upgrade_preserves_paid_teams_resolves_pending_duplicates_and_moves_scor
         assert connection.execute(text("SELECT acm_review_status FROM registration_members WHERE registration_id = :id"), {"id": paid}).scalar() == "PENDING"
         assert connection.execute(text("SELECT status FROM payment_orders WHERE registration_id = :id"), {"id": old_pending}).scalar() == "CANCELLED"
         assert connection.execute(text("SELECT anonymous_code FROM submissions WHERE registration_id = :id"), {"id": paid}).scalar().startswith("HM-")
-        card = connection.execute(text("SELECT status, scores::text FROM scorecards WHERE registration_id = :id"), {"id": paid}).one()
-        assert card.status == "SUBMITTED" and '"innovation": 8' in card.scores
-        assert connection.execute(text("SELECT count(*) FROM evaluation_assignments WHERE registration_id = :id"), {"id": paid}).scalar() == 1
+        cards = connection.execute(text(
+            "SELECT r.name, r.status, c.status AS card_status, c.scores::text AS scores FROM scorecards c "
+            "JOIN evaluation_rounds r ON r.id = c.round_id WHERE c.registration_id = :id ORDER BY r.sequence"
+        ), {"id": paid}).all()
+        # Both legacy rounds survive as separate rounds; the latest stays open.
+        assert [(card.name, card.status, card.card_status) for card in cards] == [
+            ("Round 1 (round-1)", "CLOSED", "SUBMITTED"), ("Round 2 (finals)", "OPEN", "SUBMITTED"),
+        ]
+        assert '"innovation": 8' in cards[0].scores and '"innovation": 9' in cards[1].scores
+        assert connection.execute(text("SELECT count(*) FROM evaluation_assignments WHERE registration_id = :id"), {"id": paid}).scalar() == 2
     engine.dispose()
 
     command.downgrade(_config(scratch_url), "0006_admin_live_data")

@@ -35,7 +35,8 @@ def effective_registration_price(members: Iterable[object]) -> RegistrationPrice
     """Price from stored members, where an admin-rejected ACM claim no longer counts."""
     return calculate_registration_price([
         {
-            "is_acm_member": bool(member.is_acm_member) and member.acm_review_status != "REJECTED",
+            # A rejected claim stays undiscounted while a corrected ID awaits re-review (RECHECK).
+            "is_acm_member": bool(member.is_acm_member) and member.acm_review_status not in ("REJECTED", "RECHECK"),
             "college": member.college,
         }
         for member in members

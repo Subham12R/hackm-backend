@@ -219,6 +219,8 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
             round_ = judging.current_round(session, create=True)
             if round_.status == "CLOSED":
                 raise HTTPException(409, "the current round is closed")
+            if not judging.is_eligible(session, round_, registration_id):
+                raise HTTPException(409, "this team is not eligible for the current round")
             if session.scalar(select(EvaluationAssignment.id).where(
                 EvaluationAssignment.round_id == round_.id, EvaluationAssignment.registration_id == registration_id, EvaluationAssignment.judge_user_id == judge.id,
             )) is None:
@@ -391,7 +393,7 @@ def _registration_rows(session, registrations: list[Registration], timezone: str
             "members": len(team),
             "acm": "Yes" if acm_count else "No",
             "acm_members": acm_count,
-            "acm_pending": sum(member.is_acm_member and member.acm_review_status == "PENDING" for member in team),
+            "acm_pending": sum(member.is_acm_member and member.acm_review_status in ("PENDING", "RECHECK") for member in team),
             "category": registration.category,
             "registration_status": registration.status,
             "payment_status": latest.get(registration.id, "NOT_STARTED"),

@@ -142,8 +142,8 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 if acm_id != member.acm_id:
                     changes["acm_id"] = {"from": member.acm_id, "to": acm_id}
                     member.acm_id = acm_id
-                    # A new ID must be checked again before the discount is trusted.
-                    member.acm_review_status = "PENDING"
+                    # A new ID must be checked again; after a rejection the discount stays off until then.
+                    member.acm_review_status = "RECHECK" if member.acm_review_status in ("REJECTED", "RECHECK") else "PENDING"
                     member.acm_reviewed_at = None
                     member.acm_reviewed_by_user_id = None
             if changes:

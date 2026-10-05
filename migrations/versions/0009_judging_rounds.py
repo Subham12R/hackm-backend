@@ -123,29 +123,42 @@ def upgrade() -> None:
 
 
 def _migrate_legacy_scores() -> None:
-    """Move single-judge assignments and old five-column scores into a default Round 1."""
+    """Move single-judge assignments and old five-column scores into rounds.
+
+    Each distinct legacy round label becomes its own judging round (ordered by first score), so a
+    judge who scored a team in two legacy rounds keeps both scorecards.
+    """
     bind = op.get_bind()
     legacy = bind.execute(sa.text(
         "SELECT registration_id, round, innovation, technical, problem_solving, ui_ux, completeness, evaluated_by_user_id, evaluated_at "
-        "FROM evaluations_legacy"
+        "FROM evaluations_legacy ORDER BY evaluated_at"
     )).all()
     assigned = bind.execute(sa.text("SELECT registration_id, assigned_user_id FROM submissions WHERE assigned_user_id IS NOT NULL")).all()
     if not legacy and not assigned:
         return
+    labels: list[str] = []
+    for row in legacy:
+        if row.round not in labels:
+            labels.append(row.round)
+    if not labels:
+        labels = ["Round 1"]
     now = datetime.now(UTC)
-    round_id = uuid4()
-    bind.execute(sa.text(
-        "INSERT INTO evaluation_rounds (id, event_id, name, sequence, status, scope, min_evaluations, created_at) "
-        "VALUES (:id, :event, 'Round 1', 1, 'OPEN', 'ALL_SUBMITTED', 1, :now)"
-    ), {"id": round_id, "event": EVENT_ID, "now": now})
-    for position, (key, label) in enumerate(LEGACY_CRITERIA):
+    round_ids: dict[str, object] = {}
+    for sequence, label in enumerate(labels, start=1):
+        round_ids[label] = uuid4()
         bind.execute(sa.text(
-            "INSERT INTO evaluation_criteria (id, round_id, key, label, max_score, weight, position) VALUES (:id, :round, :key, :label, 10, 1, :position)"
-        ), {"id": uuid4(), "round": round_id, "key": key, "label": label, "position": position})
+            "INSERT INTO evaluation_rounds (id, event_id, name, sequence, status, scope, min_evaluations, created_at) "
+            "VALUES (:id, :event, :name, :sequence, :status, 'ALL_SUBMITTED', 1, :now)"
+        ), {"id": round_ids[label], "event": EVENT_ID, "name": f"Round {sequence}" if label == "Round 1" else f"Round {sequence} ({label})"[:120],
+            "sequence": sequence, "status": "OPEN" if sequence == len(labels) else "CLOSED", "now": now})
+        for position, (key, criterion_label) in enumerate(LEGACY_CRITERIA):
+            bind.execute(sa.text(
+                "INSERT INTO evaluation_criteria (id, round_id, key, label, max_score, weight, position) VALUES (:id, :round, :key, :label, 10, 1, :position)"
+            ), {"id": uuid4(), "round": round_ids[label], "key": key, "label": criterion_label, "position": position})
     assignments: dict[tuple, object] = {}
 
-    def assignment(registration_id, judge_id):
-        key = (registration_id, judge_id)
+    def assignment(round_id, registration_id, judge_id):
+        key = (round_id, registration_id, judge_id)
         if key not in assignments:
             assignments[key] = uuid4()
             bind.execute(sa.text(
@@ -153,16 +166,17 @@ def _migrate_legacy_scores() -> None:
             ), {"id": assignments[key], "round": round_id, "reg": registration_id, "judge": judge_id, "now": now})
         return assignments[key]
 
+    # Open (latest) round carries the single-judge assignments that had no scores yet.
     for row in assigned:
-        assignment(row.registration_id, row.assigned_user_id)
+        assignment(round_ids[labels[-1]], row.registration_id, row.assigned_user_id)
     for row in legacy:
-        assignment_id = assignment(row.registration_id, row.evaluated_by_user_id)
+        round_id = round_ids[row.round]
         scores = {key: getattr(row, key) for key, _label in LEGACY_CRITERIA}
         bind.execute(sa.text(
             "INSERT INTO scorecards (id, assignment_id, round_id, registration_id, judge_user_id, status, scores, comments, submitted_at, updated_at) "
-            "VALUES (:id, :assignment, :round, :reg, :judge, 'SUBMITTED', CAST(:scores AS JSON), :comments, :at, :at) ON CONFLICT (assignment_id) DO NOTHING"
-        ), {"id": uuid4(), "assignment": assignment_id, "round": round_id, "reg": row.registration_id, "judge": row.evaluated_by_user_id,
-            "scores": json.dumps(scores), "comments": f"Imported from legacy round '{row.round}'", "at": row.evaluated_at})
+            "VALUES (:id, :assignment, :round, :reg, :judge, 'SUBMITTED', CAST(:scores AS JSON), '', :at, :at)"
+        ), {"id": uuid4(), "assignment": assignment(round_id, row.registration_id, row.evaluated_by_user_id), "round": round_id,
+            "reg": row.registration_id, "judge": row.evaluated_by_user_id, "scores": json.dumps(scores), "at": row.evaluated_at})
 
 
 def downgrade() -> None:

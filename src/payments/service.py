@@ -160,6 +160,10 @@ def accept_reviewed_attempt(session: Session, attempt: PaymentAttempt, actor: Us
     order = session.get(PaymentOrder, attempt.order_id, with_for_update=True, populate_existing=True)
     if order.purpose != REGISTRATION or attempt.amount_minor != order.amount_minor or registration.status not in ("ABANDONED", "PAYMENT_PENDING"):
         raise ValueError("attempt_not_acceptable")
+    attempt = session.get(PaymentAttempt, attempt.id, with_for_update=True, populate_existing=True)
+    if refundable_amount(session, attempt) != attempt.amount_minor:
+        # Any refund (even pending) means the money is going back; it cannot also buy a registration.
+        raise ValueError("attempt_already_refunded")
     if _other_paid_registration(session, registration) is not None:
         raise ValueError("registration_conflict")
     # The leader's own unpaid replacement yields to the payment that actually arrived.
@@ -281,11 +285,11 @@ def refresh_adjustment(session: Session, registration: Registration, notify: boo
             PaymentOrder.registration_id == registration.id, PaymentOrder.purpose == ADJUSTMENT, PaymentOrder.status == "CAPTURED",
         )
     ) is not None
-    previous = registration.adjustment_status
+    previous_status, previous_amount = registration.adjustment_status, registration.adjustment_amount_minor
     if owed > 0:
         registration.adjustment_status = "REQUIRED"
         registration.adjustment_amount_minor = owed
-        if notify and (previous != "REQUIRED" or registration.adjustment_amount_minor != owed):
+        if notify and (previous_status != "REQUIRED" or previous_amount != owed):
             queue_email(session, registration.leader_email, "HackMatrix registration: balance due", action_email(
                 title="A balance is due on your registration",
                 intro="An ACM membership claim on your team could not be verified, so the discounted rate no longer applies.",
@@ -366,6 +370,13 @@ def _activate_leader(session: Session, registration: Registration) -> None:
             rows=[("Account", user.email_normalized), amount_row, ("Event", "HackMatrix 26")],
             steps=["Open the sign-in page.", "Use your existing password.", "Open the participant dashboard."],
             action="Sign in", url=f"{app_url()}/login", note="Use “Forgot password” if you do not remember it.",
+        ))
+        return
+    if user is not None and user.status in (UserStatus.DISABLED, UserStatus.SUSPENDED):
+        # Paying must never revive a blocked account (it could still hold staff roles).
+        session.add(AuditLog(
+            actor_user_id=None, action="Paid leader account is blocked", target_type="registration",
+            target_id=str(registration.id), metadata_json={"leader": registration.leader_email},
         ))
         return
     if user is None:

@@ -205,3 +205,49 @@ def test_existing_active_staff_leader_is_granted_participant_access_without_reac
         user = session.scalar(select(User).where(User.email_normalized == email))
         assert {role.code for role in user.roles} == {RoleCode.SUPPORT_ADMIN, RoleCode.PARTICIPANT}
     assert harness.client.get("/api/v1/participant/dashboard", headers=harness.login(email, "participant")).status_code == 200
+
+
+def test_resubmitting_an_acm_id_after_rejection_does_not_clear_the_balance() -> None:
+    harness = Harness()
+    payload, leader_headers = harness.paid_team()
+    admin = harness.login(staff(RoleCode.REGISTRATION_ADMIN), "admin")
+    registration = _registration(payload["members"][0]["email"])
+    with db() as session:
+        member_id = session.scalar(select(RegistrationMember.id).where(RegistrationMember.registration_id == registration.id, RegistrationMember.is_acm_member))
+    harness.client.post(f"/api/v1/admin/teams/{registration.id}/members/{member_id}/acm-review", headers=admin, json={"status": "REJECTED"})
+    edited = harness.client.patch(f"/api/v1/participant/team/members/{member_id}", headers=leader_headers, json={"acm_id": "ACM-NEW"})
+    assert edited.json()["member"]["acm_review_status"] == "RECHECK"
+    assert edited.json()["adjustment"] == {"status": "REQUIRED", "amount_minor": 20000}
+    verified = harness.client.post(f"/api/v1/admin/teams/{registration.id}/members/{member_id}/acm-review", headers=admin, json={"status": "VERIFIED"})
+    assert verified.json()["adjustment"] == {"status": "NONE", "amount_minor": 0}
+
+
+def test_a_refunded_review_payment_cannot_also_be_accepted() -> None:
+    harness = Harness()
+    payload, created = harness.register()
+    with db() as session:
+        session.execute(update(PaymentOrder).where(PaymentOrder.provider_order_id == created.json()["order_id"]).values(status="CANCELLED"))
+        session.execute(update(Registration).where(Registration.leader_email == payload["members"][0]["email"]).values(status="ABANDONED"))
+        session.commit()
+    late = harness.gateway.pay(created.json()["order_id"], created.json()["amount"])
+    harness.confirm(late)
+    with db() as session:
+        attempt_id = session.scalar(select(PaymentAttempt.id).where(PaymentAttempt.provider_payment_id == late["id"]))
+    admin = harness.login(staff(RoleCode.SUPER_ADMIN), "admin")
+    refunded = harness.client.post(f"/api/v1/admin/payments/{attempt_id}/refunds", headers=admin, json={"reason": "late payment", "idempotency_key": uuid4().hex})
+    assert refunded.status_code == 201
+    assert harness.client.post(f"/api/v1/admin/payments/{attempt_id}/accept", headers=admin).status_code == 409
+    assert _registration(payload["members"][0]["email"]).status == "ABANDONED"
+
+
+def test_paying_never_revives_a_disabled_account() -> None:
+    harness = Harness()
+    email = staff(RoleCode.EVENT_ADMIN)
+    with db() as session:
+        session.execute(update(User).where(User.email_normalized == email).values(status="DISABLED"))
+        session.commit()
+    _payload, created = harness.register(leader_email=email)
+    assert harness.confirm(harness.gateway.pay(created.json()["order_id"], created.json()["amount"])).status_code == 200
+    with db() as session:
+        assert session.scalar(select(User.status).where(User.email_normalized == email)) == "DISABLED"
+    assert not [message for message in harness.sink.messages if message[0] == email]
