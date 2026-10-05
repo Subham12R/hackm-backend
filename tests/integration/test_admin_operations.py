@@ -15,6 +15,8 @@ from src.auth.policies import RoleCode
 from src.auth.security import hash_password
 from src.db.models.identity import AuditLog, Role, User, UserStatus
 from src.db.models.registration import (
+    PaymentAttempt,
+    Refund,
     PaymentOrder,
     Registration,
     RegistrationMember,
@@ -263,16 +265,33 @@ def test_overview_uses_captured_money_and_shared_recent_rows() -> None:
         )
         session.commit()
         expected_metrics = {
-            "registrations": session.scalar(select(func.count(Registration.id))),
+            "registrations": session.scalar(
+                select(func.count(Registration.id)).where(
+                    Registration.status.in_(("PAYMENT_PENDING", "PAID", "REFUNDED"))
+                )
+            ),
+            "paid_teams": session.scalar(
+                select(func.count(Registration.id)).where(Registration.status == "PAID")
+            ),
+            # Net of processed refunds; this test seeds none, so it equals captured money.
             "monetary_amount_minor": session.scalar(
                 select(func.coalesce(func.sum(PaymentOrder.amount_minor), 0)).where(
                     PaymentOrder.status == "CAPTURED"
                 )
+            )
+            - session.scalar(
+                select(func.coalesce(func.sum(Refund.amount_minor), 0)).where(
+                    Refund.status == "PROCESSED"
+                )
             ),
+            # Finalized submissions, not paid registrations.
             "submissions": session.scalar(
-                select(func.count(Registration.id)).where(Registration.status == "PAID")
+                select(func.count(Submission.id)).where(Submission.status == "SUBMITTED")
             ),
             "total_users": session.scalar(select(func.count(User.id))),
+            "payments_needing_review": session.scalar(
+                select(func.count(PaymentAttempt.id)).where(PaymentAttempt.status == "NEEDS_REVIEW")
+            ),
         }
 
     response = client.get(

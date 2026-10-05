@@ -41,7 +41,7 @@ def test_leader_can_save_and_finalize_only_their_submission() -> None:
     client = TestClient(app)
     token = client.post("/api/v1/auth/login", json={"email": email, "password": "password", "portal": "participant"}).json()["tokens"]["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
-    saved = client.put("/api/v1/participant/submission", headers=headers, json={"project_name": "Signal", "github_url": "https://github.com/example/signal", "demo_url": "", "video_url": ""})
+    saved = client.put("/api/v1/participant/submission", headers=headers, json={"project_name": "Signal", "github_url": "https://github.com/example/signal", "pitch_deck_url": "https://docs.example.com/deck", "demo_url": "", "video_url": ""})
     finalized = client.post("/api/v1/participant/submission/finalize", headers=headers)
     edited = client.put("/api/v1/participant/submission", headers=headers, json={"project_name": "Changed", "github_url": "https://github.com/example/signal", "demo_url": "", "video_url": ""})
     assert saved.status_code == 200

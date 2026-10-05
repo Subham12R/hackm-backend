@@ -4,17 +4,19 @@ from hashlib import sha256
 from secrets import token_urlsafe
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from src.auth.security import decode_access_token, hash_password
+from src.api.deps import authenticated_user, bearer_claims
+from src.auth.security import decode_access_token, hash_password, verify_password
 from src.communications.templates import action_email
 from src.auth.service import AuthenticationError, authenticate, issue_tokens, rotate_tokens
 from src.auth.sessions import InvalidRefreshSession
 from src.auth.policies import RoleCode
-from src.auth.rate_limits import is_limited
+from src.auth.rate_limits import is_blocked, is_limited
+from src.communications.outbox import dispatch_pending, queue_email
 from src.db.models.identity import AdminInvite, AuditLog, PasswordResetToken, RefreshSession, Role, User, UserStatus
 from src.db.models.registration import ActivationToken
 from src.db.session import create_db_engine
@@ -36,7 +38,12 @@ class ForgotPasswordRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     token: str
-    password: str
+    password: str = Field(min_length=8, max_length=256)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=256)
 
 
 class AdminInviteRequest(BaseModel):
@@ -46,12 +53,12 @@ class AdminInviteRequest(BaseModel):
 
 class AcceptInviteRequest(BaseModel):
     token: str
-    password: str
+    password: str = Field(min_length=8, max_length=256)
 
 
 class ActivateRequest(BaseModel):
     token: str
-    password: str
+    password: str = Field(min_length=8, max_length=256)
 
 
 def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, email_sender) -> APIRouter:
@@ -93,14 +100,21 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
             session.commit()
             return {"tokens": {"access_token": access, "refresh_token": refresh.token}, "user": user_payload(user)}
 
+    def dispatch(request: Request, background: BackgroundTasks) -> None:
+        background.add_task(dispatch_pending, request.app.state.database_url, email_sender)
+
     @router.post("/login")
     def login(payload: LoginRequest, request: Request):
         with Session(create_db_engine(request.app.state.database_url)) as session:
+            key = f"login:{payload.email.strip().lower()}"
+            now = datetime.now(UTC)
+            # Checked before the password so a correct guess after lockout is still refused.
+            if is_blocked(session, key, now, 5, timedelta(minutes=15)):
+                raise HTTPException(429, "too many login attempts")
             try:
                 user = authenticate(session, payload.email, payload.password, payload.portal)
             except AuthenticationError:
-                key = f"login:{payload.email.strip().lower()}:{request.client.host}"
-                limited = is_limited(session, key, datetime.now(UTC), 5, timedelta(minutes=15))
+                limited = is_limited(session, key, now, 5, timedelta(minutes=15))
                 session.commit()
                 if limited:
                     raise HTTPException(429, "too many login attempts")
@@ -125,10 +139,10 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
         with Session(create_db_engine(request.app.state.database_url)) as session:
             from hashlib import sha256
             row = session.scalar(select(RefreshSession).where(RefreshSession.token_hash == sha256(payload.refresh_token.encode()).hexdigest()))
-            if row is not None:
+            if row is not None and row.revoked_at is None:
                 user = session.get(User, row.user_id)
                 row.revoked_at = datetime.now(UTC)
-                session.add(AuditLog(actor_user_id=row.user_id, action="logout", target_type="user", target_id=user.email_normalized, metadata_json={}))
+                session.add(AuditLog(actor_user_id=row.user_id, action="logout", target_type="user", target_id=user.email_normalized if user else "", metadata_json={}))
                 session.commit()
 
     def super_admin(request: Request, authorization: str) -> User:
@@ -146,15 +160,24 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
             return user
 
     @router.post("/admin/invites", status_code=201)
-    def create_invite(payload: AdminInviteRequest, request: Request, authorization: str = Header()):
+    def create_invite(payload: AdminInviteRequest, request: Request, background: BackgroundTasks, authorization: str = Header()):
         admin = super_admin(request, authorization)
         with Session(create_db_engine(request.app.state.database_url)) as session:
             token = token_urlsafe(32)
             invite = AdminInvite(email_normalized=payload.email.strip().lower(), role_code=payload.role, token_hash=sha256(token.encode()).hexdigest(), expires_at=datetime.now(UTC) + timedelta(days=7), invited_by_user_id=admin.id)
             session.add(invite)
+            session.flush()
             session.add(AuditLog(actor_user_id=admin.id, action="admin_invite_created", target_type="admin_invite", target_id=str(invite.id), metadata_json={"role": str(payload.role)}))
-            email_sender.send(invite.email_normalized, "HackMatrix admin invite", f"<a href=\"https://hackmatrix.example/admin/invite?token={token}\">Accept invite</a>")
+            admin_url = os.getenv("ADMIN_APP_URL", "http://localhost:3001")
+            queue_email(session, invite.email_normalized, "HackMatrix staff invite", action_email(
+                title="You are invited to HackMatrix", intro=f"You have been invited as {payload.role.value.replace('_', ' ').title()}.",
+                rows=[("Account", invite.email_normalized), ("Role", payload.role.value)],
+                steps=["Open the invite link.", "Choose a password.", "Sign in to the admin portal."],
+                action="Accept invite", url=f"{admin_url}/invite?token={token}", note="This invite expires in 7 days.",
+            ))
             session.commit()
+            dispatch(request, background)
+            return {"id": str(invite.id), "email": invite.email_normalized, "role": payload.role.value, "expires_at": invite.expires_at.isoformat()}
 
     @router.post("/admin/invites/accept", status_code=204)
     def accept_invite(payload: AcceptInviteRequest, request: Request):
@@ -178,7 +201,7 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
             session.commit()
 
     @router.post("/password/forgot", status_code=202)
-    def forgot_password(payload: ForgotPasswordRequest, request: Request):
+    def forgot_password(payload: ForgotPasswordRequest, request: Request, background: BackgroundTasks):
         with Session(create_db_engine(request.app.state.database_url)) as session:
             email = payload.email.strip().lower()
             if is_limited(session, f"reset:{email}", datetime.now(UTC), 3, timedelta(hours=1)):
@@ -190,7 +213,7 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
                 app_url = os.getenv('PARTICIPANT_APP_URL', 'http://localhost:3000')
                 if user.status == UserStatus.PENDING_ACTIVATION:
                     session.add(ActivationToken(user_id=user.id, token_hash=sha256(token.encode()).hexdigest(), expires_at=datetime.now(UTC) + timedelta(minutes=30)))
-                    email_sender.send(email, "Activate your HackMatrix account", action_email(
+                    queue_email(session, email, "Activate your HackMatrix account", action_email(
                         title="Activate your account", intro="Use this link within 30 minutes to create your password.",
                         rows=[("Account", email)], steps=["Open the activation link.", "Create a password."],
                         action="Activate account", url=f"{app_url}/activate?token={token}",
@@ -198,7 +221,7 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
                     ))
                 elif user.status == UserStatus.ACTIVE:
                     session.add(PasswordResetToken(user_id=user.id, token_hash=sha256(token.encode()).hexdigest(), expires_at=datetime.now(UTC) + timedelta(hours=1)))
-                    email_sender.send(email, "Reset your HackMatrix password", action_email(
+                    queue_email(session, email, "Reset your HackMatrix password", action_email(
                         title="Reset your password", intro="Use this link within 1 hour to choose a new password.",
                         rows=[("Account", email)], steps=["Open the reset link.", "Choose a new password."],
                         action="Reset password", url=f"{app_url}/reset-password?token={token}",
@@ -206,6 +229,7 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
                     ))
                 session.add(AuditLog(actor_user_id=user.id, action="password_reset_requested", target_type="user", target_id=email, metadata_json={}))
             session.commit()
+        dispatch(request, background)
 
     @router.post("/password/reset", status_code=204)
     def reset_password(payload: ResetPasswordRequest, request: Request):
@@ -232,9 +256,29 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
             raise HTTPException(401, "invalid access token") from None
         with Session(create_db_engine(request.app.state.database_url)) as session:
             user = session.scalar(select(User).options(selectinload(User.roles)).where(User.id == claims["sub"]))
-            if user is None:
+            if user is None or user.status != UserStatus.ACTIVE:
                 raise HTTPException(401, "invalid access token")
             return {"user": user_payload(user)}
+
+    @router.post("/password/change", status_code=204)
+    def change_password(payload: ChangePasswordRequest, request: Request, authorization: str = Header()):
+        session, user = authenticated_user(request, authorization, public_key)
+        with session:
+            now = datetime.now(UTC)
+            key = f"password-change:{user.id}"
+            if is_blocked(session, key, now, 5, timedelta(minutes=15)):
+                raise HTTPException(429, "too many attempts")
+            if user.password_hash is None or not verify_password(payload.current_password, user.password_hash):
+                is_limited(session, key, now, 5, timedelta(minutes=15))
+                session.commit()
+                raise HTTPException(400, "current password is incorrect")
+            user.password_hash = hash_password(payload.new_password)
+            current_sid = bearer_claims(authorization, public_key).get("sid")
+            for refresh_session in session.scalars(select(RefreshSession).where(RefreshSession.user_id == user.id, RefreshSession.revoked_at.is_(None))):
+                if str(refresh_session.id) != current_sid:
+                    refresh_session.revoked_at = now
+            session.add(AuditLog(actor_user_id=user.id, action="password_changed", target_type="user", target_id=user.email_normalized, metadata_json={}))
+            session.commit()
 
     return router
 

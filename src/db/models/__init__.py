@@ -1,8 +1,14 @@
 from src.db.models.registration import (  # noqa: F401
+    Announcement,
+    AnnouncementRead,
+    Challenge,
+    EmailOutbox,
     Event,
+    PaymentAttempt,
     PaymentOrder,
     PaymentWebhookEvent,
     Registration,
+    Refund,
     RegistrationMember,
 )
 from src.db.models.identity import (  # noqa: F401
@@ -14,4 +20,13 @@ from src.db.models.identity import (  # noqa: F401
     Role,
     User,
     UserRole,
+)
+from src.db.models.judging import (  # noqa: F401
+    EvaluationAssignment,
+    EvaluationCriterion,
+    EvaluationRound,
+    ResultRow,
+    ResultSnapshot,
+    RoundEntry,
+    Scorecard,
 )

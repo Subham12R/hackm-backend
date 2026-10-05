@@ -1,5 +1,8 @@
+import asyncio
+import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 
 from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
 from dotenv import load_dotenv
@@ -13,12 +16,15 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.auth import auth_router
 from src.api.admin import admin_router
+from src.api.admin_payments import admin_payments_router
 from src.api.participant import participant_router
 from src.api.registrations import router as registration_router
 from src.payments.providers.razorpay import client as razorpay_client
 from src.communications.providers.resend import ResendEmailSender
 from src.communications.providers.sink import LocalEmailSink
 from src.api.errors import ApiError
+from src.cache import cache_from_env
+from src.communications.outbox import dispatch_pending
 from src.api.middleware import request_id_middleware
 from src.config import Settings, decode_pem_env
 from src.db.session import create_db_engine
@@ -38,7 +44,18 @@ def create_app(
         or os.getenv("DATABASE_URL")
         or os.getenv("NEON_DATABASE_URL")
     )
-    app = FastAPI(title="HackMatrix API")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        task = None
+        if app.state.database_url and os.getenv("EMAIL_OUTBOX_WORKER", "1") == "1":
+            task = asyncio.create_task(_outbox_loop(app))
+        yield
+        if task is not None:
+            task.cancel()
+
+    app = FastAPI(title="HackMatrix API", lifespan=lifespan)
+    app.state.cache = cache_from_env()
     app.state.database_url = settings.database_url
     app.state.razorpay_key_id = razorpay_key_id or os.getenv("RAZORPAY_KEY_ID")
     app.state.razorpay_webhook_secret = razorpay_webhook_secret or os.getenv("RAZORPAY_WEBHOOK_SECRET")
@@ -91,8 +108,19 @@ def create_app(
         )
         app.include_router(participant_router(public_key))
         app.include_router(admin_router(public_key))
+        app.include_router(admin_payments_router(public_key))
 
     return app
+
+
+async def _outbox_loop(app: FastAPI) -> None:
+    """Retry emails whose immediate post-commit delivery failed."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await asyncio.to_thread(dispatch_pending, app.state.database_url, app.state.email_sender)
+        except Exception:
+            logging.getLogger(__name__).warning("outbox retry pass failed", exc_info=True)
 
 
 app = create_app()
