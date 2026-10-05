@@ -275,16 +275,18 @@ def test_overview_uses_captured_money_and_shared_recent_rows() -> None:
             "paid_teams": session.scalar(
                 select(func.count(Registration.id)).where(Registration.status == "PAID")
             ),
-            # Net of processed refunds; this test seeds none, so it equals captured money.
+            # Net of processed refunds of captured payments.
             "monetary_amount_minor": session.scalar(
                 select(func.coalesce(func.sum(PaymentOrder.amount_minor), 0)).where(
                     PaymentOrder.status == "CAPTURED"
                 )
             )
+            # Refunds of review payments were never counted as collected, so only
+            # refunds of fulfilling payments are subtracted.
             - session.scalar(
-                select(func.coalesce(func.sum(Refund.amount_minor), 0)).where(
-                    Refund.status == "PROCESSED"
-                )
+                select(func.coalesce(func.sum(Refund.amount_minor), 0))
+                .join(PaymentAttempt, PaymentAttempt.id == Refund.payment_attempt_id)
+                .where(Refund.status == "PROCESSED", PaymentAttempt.status == "CAPTURED")
             ),
             # Finalized submissions, not paid registrations.
             "submissions": session.scalar(
