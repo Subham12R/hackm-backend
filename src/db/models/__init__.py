@@ -30,3 +30,4 @@ from src.db.models.judging import (  # noqa: F401
     RoundEntry,
     Scorecard,
 )
+from src.db.models.contact import ContactMessage, ContactReply  # noqa: F401

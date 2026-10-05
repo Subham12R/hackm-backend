@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -205,7 +206,8 @@ def test_judge_cannot_read_identity_bearing_admin_tables() -> None:
 def test_overview_uses_captured_money_and_shared_recent_rows() -> None:
     client = _client()
     admin_email = f"admin-{uuid4()}@example.com"
-    created_at = datetime(2200, 1, 1, tzinfo=UTC) + timedelta(days=uuid4().int % 365)
+    # Strictly later than any earlier run's seed, so this row is always among the 10 most recent.
+    created_at = datetime(2200, 1, 1, tzinfo=UTC) + timedelta(seconds=time.time())
     with Session(create_engine(TEST_DATABASE_URL)) as session:
         admin = User(
             email_normalized=admin_email,

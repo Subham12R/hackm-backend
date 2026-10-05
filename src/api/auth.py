@@ -184,7 +184,7 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
         with Session(create_db_engine(request.app.state.database_url)) as session:
             invite = session.scalar(select(AdminInvite).where(AdminInvite.token_hash == sha256(payload.token.encode()).hexdigest()))
             now = datetime.now(UTC)
-            if invite is None or invite.accepted_at is not None or invite.expires_at <= now:
+            if invite is None or invite.accepted_at is not None or invite.revoked_at is not None or invite.expires_at <= now:
                 raise HTTPException(400, "invalid invite token")
             user = session.scalar(select(User).options(selectinload(User.roles)).where(User.email_normalized == invite.email_normalized))
             role = session.get(Role, invite.role_code)

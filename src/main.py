@@ -16,7 +16,12 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.auth import auth_router
 from src.api.admin import admin_router
+from src.api.admin_event import admin_event_router
+from src.api.admin_judging import admin_judging_router
+from src.api.admin_ops import admin_ops_router
 from src.api.admin_payments import admin_payments_router
+from src.api.judge import judge_router
+from src.api.public import router as public_router
 from src.api.participant import participant_router
 from src.api.registrations import router as registration_router
 from src.payments.providers.razorpay import client as razorpay_client
@@ -70,6 +75,7 @@ def create_app(
         else LocalEmailSink()
     )
     app.include_router(registration_router)
+    app.include_router(public_router)
     app.middleware("http")(request_id_middleware)
 
     @app.exception_handler(ApiError)
@@ -109,6 +115,10 @@ def create_app(
         app.include_router(participant_router(public_key))
         app.include_router(admin_router(public_key))
         app.include_router(admin_payments_router(public_key))
+        app.include_router(admin_event_router(public_key))
+        app.include_router(admin_judging_router(public_key))
+        app.include_router(admin_ops_router(public_key))
+        app.include_router(judge_router(public_key))
 
     return app
 

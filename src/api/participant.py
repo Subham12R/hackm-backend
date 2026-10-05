@@ -27,7 +27,10 @@ from src.db.models.registration import (
     RegistrationMember,
     Submission,
 )
+from src.db.models.judging import ResultRow
 from src.events.service import current_event, event_payload
+from src.judging.service import criteria as judging_criteria
+from src.judging.service import released_snapshots
 from src.events.windows import challenge_released, ensure_window_open, window_state
 from src.operations import team_code
 from src.payments import service as payments
@@ -229,6 +232,24 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
             session.commit()
             return {"order_id": order.provider_order_id, "amount": order.amount_minor, "currency": order.currency,
                     "key_id": request.app.state.razorpay_key_id, "team_name": registration.team_name, "purpose": payments.ADJUSTMENT}
+
+    @router.get("/results")
+    def results(request: Request, authorization: str = Header()):
+        """Only released rounds; nothing about unreleased scores is ever returned."""
+        session, _user, registration = leader_registration(request, authorization)
+        with session:
+            rounds = []
+            for round_, snapshot in released_snapshots(session):
+                row = session.scalar(select(ResultRow).where(ResultRow.snapshot_id == snapshot.id, ResultRow.registration_id == registration.id))
+                ranked = session.scalar(select(func.count(ResultRow.id)).where(ResultRow.snapshot_id == snapshot.id, ResultRow.eligible)) or 0
+                rubric = [{"key": item.key, "label": item.label, "max_score": item.max_score} for item in judging_criteria(session, round_.id)]
+                rounds.append({
+                    "round": round_.name, "released_at": snapshot.released_at.isoformat(), "ranked_teams": int(ranked), "criteria": rubric,
+                    "result": None if row is None else {
+                        "rank": row.rank, "score": row.score, "eligible": row.eligible, "breakdown": row.breakdown, "evaluations": row.evaluations,
+                    },
+                })
+            return {"released": bool(rounds), "rounds": rounds}
 
     @router.get("/challenge")
     def challenge(request: Request, authorization: str = Header()):
