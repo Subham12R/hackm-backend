@@ -109,7 +109,7 @@ def admin_ops_router(public_key: Ed25519PublicKey) -> APIRouter:
             if payload.kind == "REPLY":
                 queue_email(session, message.email, f"Re: {message.subject}", action_email(
                     title=f"Re: {message.subject}", intro=payload.body, rows=[], steps=[], action="Visit HackMatrix",
-                    url="https://hackmatrix.codes", note=f"In reply to your message from {message.created_at:%d %b %Y}.",
+                    url="https://hackmatrix.codes", note=f"In reply to your message from {message.created_at:%d %b %Y}.", eyebrow="From the organisers",
                 ))
                 if message.status == "NEW":
                     message.status = "OPEN"

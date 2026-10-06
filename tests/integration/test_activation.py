@@ -77,7 +77,7 @@ def test_activation_token_sets_password_once_and_is_not_returned_by_webhook() ->
     assert webhook.status_code == 200
     assert "token=" not in webhook.text
     assert "background:#ffffff" in sink.messages[-1][2]
-    assert "<s style=\"color:#78716c\">₹400</s> ₹200" in sink.messages[-1][2]
+    assert "₹400</s>" in sink.messages[-1][2] and "₹200" in sink.messages[-1][2]
     activation_token = re.search(r'token=([^"]+)', sink.messages[-1][2]).group(1)
 
     assert client.post("/api/v1/auth/password/forgot", json={"email": email}).status_code == 202

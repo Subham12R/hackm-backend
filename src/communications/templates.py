@@ -1,5 +1,68 @@
 from html import escape
 
+# Soft "moodboard" palette: warm linen page, white card, pastel accents, near-black ink.
+PAGE = "#f4efe8"
+INK = "#1f1a17"
+BODY = "#57534e"
+MUTED = "#8a817a"
+PANEL = "#faf6f0"
+RULE = "#ece3d6"
+ACCENT = "#c2410c"
+PASTELS = ("#f9d5c0", "#cfdcc8", "#f6e3a1", "#dcd3ef", "#e8b89a", "#c9dbe3")
+SANS = "'Helvetica Neue',Helvetica,Arial,sans-serif"
+SERIF = "Georgia,'Times New Roman',serif"
+
+# Tile heights for the masonry strip at the top of the card.
+STRIP = (54, 86, 64, 96, 58, 78)
+
+
+def _text(value: str) -> str:
+    """Escapes user or staff text and keeps its line breaks."""
+    return escape(value).replace("\r\n", "\n").replace("\n", "<br>")
+
+
+def _strip() -> str:
+    cells = "".join(
+        f'<td valign="bottom" style="padding:0 4px;"><div style="height:{height}px;background:{color};border-radius:18px;font-size:0;line-height:0;">&nbsp;</div></td>'
+        for height, color in zip(STRIP, PASTELS)
+    )
+    return f'<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="table-layout:fixed;"><tr>{cells}</tr></table>'
+
+
+def _details(rows: list[tuple[str, str]], original_amount: str | None) -> str:
+    if not rows:
+        return ""
+    items = []
+    for index, (label, value) in enumerate(rows):
+        border = "" if index == len(rows) - 1 else f"border-bottom:1px dashed {RULE};"
+        struck = f'<s style="color:{MUTED};font-weight:400;">{escape(original_amount)}</s>&nbsp; ' if label in ("Amount due", "Amount paid") and original_amount else ""
+        items.append(
+            f"""<tr>
+              <td style="padding:14px 0;{border}font-family:{SANS};font-size:12px;letter-spacing:0.08em;text-transform:uppercase;color:{MUTED};">{escape(label)}</td>
+              <td style="padding:14px 0;{border}font-family:{SANS};font-size:15px;font-weight:700;color:{INK};text-align:right;">{struck}{escape(value)}</td>
+            </tr>"""
+        )
+    return f"""<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:28px;background:{PANEL};border-radius:20px;">
+      <tr><td style="padding:6px 22px;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0">{"".join(items)}</table></td></tr>
+    </table>"""
+
+
+def _steps(steps: list[str]) -> str:
+    if not steps:
+        return ""
+    items = "".join(
+        f"""<tr>
+          <td style="width:44px;padding:0 0 14px;vertical-align:top;">
+            <div style="width:30px;height:30px;border-radius:15px;background:{PASTELS[(index - 1) % len(PASTELS)]};text-align:center;font-family:{SANS};font-size:13px;font-weight:700;line-height:30px;color:{INK};">{index}</div>
+          </td>
+          <td style="padding:5px 0 14px;font-family:{SANS};font-size:15px;line-height:1.55;color:{BODY};">{escape(step)}</td>
+        </tr>"""
+        for index, step in enumerate(steps, start=1)
+    )
+    return f"""<p style="margin:34px 0 14px;font-family:{SANS};font-size:12px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:{MUTED};">What happens next</p>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0">{items}</table>"""
+
+
 def action_email(
     *,
     title: str,
@@ -10,50 +73,68 @@ def action_email(
     url: str,
     note: str,
     original_amount: str | None = None,
+    eyebrow: str = "HackMatrix 26",
 ) -> str:
-    detail_rows = "".join(
-        f"""<tr>
-          <td style="padding:12px 0;border-bottom:1px solid #f3e8d8;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#78716c;">{escape(label)}</td>
-          <td style="padding:12px 0;border-bottom:1px solid #f3e8d8;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1c1917;font-weight:700;text-align:right;">{f'<s style="color:#78716c">{escape(original_amount)}</s> ' if label in ('Amount due', 'Amount paid') and original_amount else ''}{escape(value)}</td>
-        </tr>"""
-        for label, value in rows
-    )
-    step_rows = "".join(
-        f"""<tr>
-          <td style="width:36px;vertical-align:top;font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:700;color:#9a3412;">{index}.</td>
-          <td style="padding:0 0 12px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#44403c;">{escape(step)}</td>
-        </tr>"""
-        for index, step in enumerate(steps, start=1)
-    )
+    href = escape(url, quote=True)
+    preheader = escape(" ".join(intro.split())[:140])
     return f"""<!doctype html>
-<html>
-  <body style="margin:0;background:#ffffff;font-family:Arial,Helvetica,sans-serif;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#ffffff;padding:28px 12px;">
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="supported-color-schemes" content="light">
+    <title>{escape(title)}</title>
+    <style>
+      @media (max-width:620px) {{
+        .card {{ padding:30px 22px !important; }}
+        .headline {{ font-size:28px !important; }}
+        .strip td {{ padding:0 2px !important; }}
+      }}
+    </style>
+  </head>
+  <body style="margin:0;padding:0;background:{PAGE};">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:{PAGE};">{preheader}</div>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:{PAGE};padding:32px 12px;">
       <tr>
         <td align="center">
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;">
             <tr>
-              <td style="padding:8px 8px 18px;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#78716c;">HackMatrix 26</td>
-            </tr>
-            <tr>
-              <td style="background:#ffffff;padding:24px 8px;">
-                <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#9a3412;">HackMatrix 26</p>
-                <h1 style="margin:10px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:32px;line-height:1.15;color:#1c1917;">{escape(title)}</h1>
-                <p style="margin:16px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.6;color:#44403c;">{escape(intro)}</p>
-                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:28px;">{detail_rows}</table>
-                <h2 style="margin:32px 0 12px;font-family:Arial,Helvetica,sans-serif;font-size:18px;color:#1c1917;">What happens next</h2>
-                <table role="presentation" width="100%" cellspacing="0" cellpadding="0">{step_rows}</table>
-                <p style="margin:28px 0 0;">
-                  <a href="{escape(url, quote=True)}" style="display:inline-block;background:#9a3412;color:#fff7ed;font-family:Arial,Helvetica,sans-serif;font-size:16px;font-weight:700;text-decoration:none;border-radius:8px;padding:14px 22px;">{escape(action)}</a>
-                </p>
-                <p style="margin:22px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.6;color:#78716c;">{escape(note)}</p>
-                <p style="margin:8px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.6;color:#78716c;word-break:break-all;">{escape(url)}</p>
+              <td style="padding:0 6px 18px;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr>
+                  <td style="font-family:{SERIF};font-size:20px;font-style:italic;color:{INK};">HackMatrix<span style="color:{ACCENT};font-style:normal;">&nbsp;&#10022;&nbsp;</span>26</td>
+                  <td align="right"><span style="display:inline-block;padding:6px 12px;border-radius:999px;background:#ffffff;font-family:{SANS};font-size:11px;letter-spacing:0.06em;color:{MUTED};">ACM &middot; Adamas University</span></td>
+                </tr></table>
               </td>
             </tr>
             <tr>
-              <td style="padding:18px 8px 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.6;color:#78716c;">
-                HackMatrix · ACM Student Chapter, Adamas University · Kolkata<br>
-                If you did not request this message, you can ignore it.
+              <td style="background:#ffffff;border-radius:28px;box-shadow:0 18px 40px rgba(31,26,23,0.08);">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                  <tr><td class="strip" style="padding:22px 18px 0;">{_strip()}</td></tr>
+                  <tr>
+                    <td class="card" style="padding:34px 40px 40px;">
+                      <span style="display:inline-block;padding:6px 14px;border-radius:999px;background:#fde7d9;font-family:{SANS};font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:{ACCENT};">{escape(eyebrow)}</span>
+                      <h1 class="headline" style="margin:18px 0 0;font-family:{SERIF};font-size:34px;font-weight:400;line-height:1.18;letter-spacing:-0.5px;color:{INK};">{escape(title)}</h1>
+                      <p style="margin:16px 0 0;font-family:{SANS};font-size:16px;line-height:1.7;color:{BODY};">{_text(intro)}</p>
+                      {_details(rows, original_amount)}
+                      {_steps(steps)}
+                      <table role="presentation" cellspacing="0" cellpadding="0" style="margin-top:32px;"><tr>
+                        <td style="border-radius:999px;background:{INK};">
+                          <a href="{href}" style="display:inline-block;padding:16px 30px;border-radius:999px;font-family:{SANS};font-size:15px;font-weight:700;letter-spacing:0.02em;color:#fffaf3;text-decoration:none;">{escape(action)}&nbsp;&nbsp;&rarr;</a>
+                        </td>
+                      </tr></table>
+                      <p style="margin:26px 0 0;font-family:{SANS};font-size:13px;line-height:1.6;color:{MUTED};">{_text(note)}</p>
+                      <p style="margin:14px 0 0;padding:12px 16px;border-radius:14px;background:{PANEL};font-family:{SANS};font-size:12px;line-height:1.5;color:{MUTED};">Button not working? Paste this link into your browser:<br><span style="color:{BODY};word-break:break-all;">{escape(url)}</span></p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td align="center" style="padding:26px 12px 0;font-family:{SANS};font-size:12px;line-height:1.7;color:{MUTED};">
+                <span style="color:{PASTELS[0]};">&#9679;</span>&nbsp;<span style="color:{PASTELS[1]};">&#9679;</span>&nbsp;<span style="color:{PASTELS[3]};">&#9679;</span><br>
+                Made with care by ACM Student Chapter, Adamas University &middot; Kolkata<br>
+                If you did not expect this message, you can safely ignore it.
               </td>
             </tr>
           </table>

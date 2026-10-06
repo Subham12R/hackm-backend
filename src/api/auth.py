@@ -177,7 +177,7 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
                 title="You are invited to HackMatrix", intro=f"You have been invited as {payload.role.value.replace('_', ' ').title()}.",
                 rows=[("Account", invite.email_normalized), ("Role", payload.role.value)],
                 steps=["Open the invite link.", "Choose a password.", "Sign in to the admin portal."],
-                action="Accept invite", url=f"{admin_url}/invite?token={token}", note="This invite expires in 7 days.",
+                action="Accept invite", url=f"{admin_url}/invite?token={token}", note="This invite expires in 7 days.", eyebrow="Staff invite",
             ))
             session.commit()
             dispatch(request, background)
@@ -221,7 +221,7 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
                         title="Activate your account", intro="Use this link within 30 minutes to create your password.",
                         rows=[("Account", email)], steps=["Open the activation link.", "Create a password."],
                         action="Activate account", url=f"{app_url}/activate?token={token}",
-                        note="If you did not ask for this, ignore this email.",
+                        note="If you did not ask for this, ignore this email.", eyebrow="Welcome",
                     ))
                 elif user.status == UserStatus.ACTIVE:
                     session.add(PasswordResetToken(user_id=user.id, token_hash=sha256(token.encode()).hexdigest(), expires_at=datetime.now(UTC) + timedelta(hours=1)))
@@ -229,7 +229,7 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
                         title="Reset your password", intro="Use this link within 1 hour to choose a new password.",
                         rows=[("Account", email)], steps=["Open the reset link.", "Choose a new password."],
                         action="Reset password", url=f"{app_url}/reset-password?token={token}",
-                        note="If you did not ask for this, ignore this email.",
+                        note="If you did not ask for this, ignore this email.", eyebrow="Account security",
                     ))
                 session.add(AuditLog(actor_user_id=user.id, action="password_reset_requested", target_type="user", target_id=email, metadata_json={}))
             session.commit()
