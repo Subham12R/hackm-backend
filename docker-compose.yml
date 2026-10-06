@@ -39,6 +39,13 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    # The participant frontend container (Subham12R/hackm) reaches this API as http://hackm-backend:8000 on "hackm".
+    networks: [default, hackm]
+
+networks:
+  hackm:
+    external: true
+    name: hackm
 
 volumes:
   hackm-postgres:
