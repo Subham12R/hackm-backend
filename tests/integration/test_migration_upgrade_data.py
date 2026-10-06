@@ -97,3 +97,49 @@ def test_upgrade_preserves_paid_teams_resolves_pending_duplicates_and_moves_scor
 
     command.downgrade(_config(scratch_url), "0006_admin_live_data")
     command.upgrade(_config(scratch_url), "head")
+
+
+def _paid_team(connection, team: str, leader: str, age: str):
+    registration_id = uuid4()
+    connection.execute(text(
+        "INSERT INTO registrations (id, event_id, team_name, leader_email, status, quoted_amount_minor, pricing_tier, created_at) "
+        f"VALUES (:id, :event, :team, :leader, 'PAID', 40000, 'standard', now() - interval '{age}')"
+    ), {"id": registration_id, "event": EVENT, "team": team, "leader": leader})
+    connection.execute(text(
+        "INSERT INTO payment_orders (id, registration_id, provider_order_id, amount_minor, currency, status) VALUES (:id, :reg, :order, 40000, 'INR', 'CAPTURED')"
+    ), {"id": uuid4(), "reg": registration_id, "order": f"order_{uuid4().hex[:10]}"})
+    return registration_id
+
+
+def test_upgrade_renames_paid_teams_whose_names_differ_only_by_case(scratch_url: str) -> None:
+    command.upgrade(_config(scratch_url), "0006_admin_live_data")
+    engine = create_engine(scratch_url)
+    with engine.begin() as connection:
+        first = _paid_team(connection, "Code Crafters", "first@example.com", "3 days")
+        second = _paid_team(connection, "code crafters", "second@example.com", "2 days")
+        numbered = _paid_team(connection, "Code Crafters (2)", "third@example.com", "1 day")
+
+    command.upgrade(_config(scratch_url), "head")
+
+    with engine.connect() as connection:
+        teams = dict(connection.execute(text("SELECT id, team_name FROM registrations WHERE status = 'PAID'")).all())
+        assert teams == {first: "Code Crafters", second: "code crafters (3)", numbered: "Code Crafters (2)"}
+        assert connection.execute(text("SELECT count(*) FROM pg_indexes WHERE indexname = 'ux_registrations_active_team_name'")).scalar() == 1
+    engine.dispose()
+
+
+def test_upgrade_stops_when_one_leader_paid_twice(scratch_url: str) -> None:
+    command.upgrade(_config(scratch_url), "0006_admin_live_data")
+    engine = create_engine(scratch_url)
+    with engine.begin() as connection:
+        _paid_team(connection, "Alpha", "lead@example.com", "2 days")
+        _paid_team(connection, "Alpha Again", "lead@example.com", "1 day")
+
+    with pytest.raises(RuntimeError, match="lead@example.com has 2 PAID registrations"):
+        command.upgrade(_config(scratch_url), "head")
+
+    # The failed upgrade rolled back; the database is still at 0006 with both teams paid.
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0006_admin_live_data"
+        assert connection.execute(text("SELECT count(*) FROM registrations WHERE status = 'PAID'")).scalar() == 2
+    engine.dispose()
