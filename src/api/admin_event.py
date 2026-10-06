@@ -194,7 +194,7 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
                 for email in sorted(set(leaders)):
                     queue_email(session, email, f"HackMatrix: {item.title}", action_email(
                         title=item.title, intro=item.body, rows=[], steps=[], action="Open dashboard",
-                        url=f"{app_url()}/dashboard", note="You are receiving this because your team is registered for HackMatrix.",
+                        url=f"{app_url()}/dashboard", note="You are receiving this because your team is registered for HackMatrix.", eyebrow="Announcement",
                     ))
                 recipients = len(set(leaders))
                 item.emailed_at = item.published_at

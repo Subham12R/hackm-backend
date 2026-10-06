@@ -296,7 +296,7 @@ def refresh_adjustment(session: Session, registration: Registration, notify: boo
                 rows=[("Team", registration.team_name), ("Amount due", f"₹{owed // 100}")],
                 steps=["Sign in to the participant dashboard.", "Pay the balance from the payment banner.", "Final submission unlocks once it is paid."],
                 action="Open dashboard", url=f"{app_url()}/dashboard",
-                note="Contact the organisers if you believe the ACM ID is valid.",
+                note="Contact the organisers if you believe the ACM ID is valid.", eyebrow="Action needed",
             ))
     else:
         registration.adjustment_amount_minor = 0
@@ -369,7 +369,7 @@ def _activate_leader(session: Session, registration: Registration) -> None:
             intro="Your team is registered. Sign in with your existing HackMatrix password.",
             rows=[("Account", user.email_normalized), amount_row, ("Event", "HackMatrix 26")],
             steps=["Open the sign-in page.", "Use your existing password.", "Open the participant dashboard."],
-            action="Sign in", url=f"{app_url()}/login", note="Use “Forgot password” if you do not remember it.",
+            action="Sign in", url=f"{app_url()}/login", note="Use “Forgot password” if you do not remember it.", eyebrow="Payment confirmed",
         ))
         return
     if user is not None and user.status in (UserStatus.DISABLED, UserStatus.SUSPENDED):
@@ -403,10 +403,11 @@ def _activate_leader(session: Session, registration: Registration) -> None:
         intro="Your payment is confirmed. Activate the leader account within 30 minutes.",
         rows=[("Account", user.email_normalized), amount_row, ("Event", "HackMatrix 26")],
         original_amount="₹400" if registration.quoted_amount_minor < 40000 else None,
-        steps=["Open the activation button.", "Choose a password.", "Sign in to the participant dashboard."],
+        steps=["Press Activate account below.", "Choose a password.", "Sign in to the participant dashboard."],
         action="Activate account",
         url=f"{app_url()}/activate?token={token}",
         note="This activation link can be used once. If it expires, use “Forgot password” to get a new one.",
+        eyebrow="Welcome to HackMatrix",
     ))
 
 
