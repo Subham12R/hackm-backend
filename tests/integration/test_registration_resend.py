@@ -42,7 +42,7 @@ def test_retrying_an_unpaid_team_reuses_the_order_without_email() -> None:
     payload = {
         "team_name": team_name, "rules_consent": True, "privacy_consent": True,
         "members": [
-            {"role": "leader", "full_name": "Leader", "email": email, "phone": "9812345678", "college": "Adamas University", "is_acm_member": True},
+            {"role": "leader", "full_name": "Leader", "email": email, "phone": "9812345678", "college": "Adamas University", "is_acm_member": True, "acm_id": "ACM123"},
             {"role": "member", "full_name": "Member", "email": f"m-{uuid4()}@example.com", "phone": "9812345679", "college": "Other", "is_acm_member": False},
         ],
     }

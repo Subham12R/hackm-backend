@@ -59,7 +59,7 @@ def test_verified_registration_ignores_client_price_and_fulfills_captured_webhoo
         "privacy_consent": True,
         "amount": 1,
         "members": [
-            {"role": "leader", "full_name": "Leader", "email": email, "phone": "9812345678", "college": "Adamas University", "is_acm_member": True},
+            {"role": "leader", "full_name": "Leader", "email": email, "phone": "9812345678", "college": "Adamas University", "is_acm_member": True, "acm_id": "ACM123"},
             {"role": "member", "full_name": "Member", "email": f"member-{uuid4()}@example.com", "phone": "9812345679", "college": "Other College", "is_acm_member": False},
         ],
     })
@@ -74,14 +74,15 @@ def test_verified_registration_ignores_client_price_and_fulfills_captured_webhoo
     body = json.dumps({
         "id": f"evt_{uuid4().hex}",
         "event": "payment.captured",
-        "payload": {"payment": {"entity": {"id": "pay_test", "order_id": payments.order.order_id, "amount": 20000, "currency": "INR", "status": "captured"}}},
+        "payload": {"payment": {"entity": {"id": f"pay_{uuid4().hex[:14]}", "order_id": payments.order.order_id, "amount": 20000, "currency": "INR", "status": "captured"}}},
     }).encode()
     signature = hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()
     event_id = json.loads(body)["id"]
     webhook = client.post("/api/v1/payments/razorpay/webhook", content=body, headers={"X-Razorpay-Signature": signature, "X-Razorpay-Event-Id": event_id})
     replay = client.post("/api/v1/payments/razorpay/webhook", content=body, headers={"X-Razorpay-Signature": signature, "X-Razorpay-Event-Id": event_id})
 
-    assert webhook.status_code == 200
+    assert webhook.status_code == 200, webhook.text
+    assert webhook.json() == {"status": "processed"}, webhook.text
     assert replay.status_code == 200
     with Session(create_engine(TEST_DATABASE_URL)) as session:
         user = session.scalar(select(User).where(User.email_normalized == email))

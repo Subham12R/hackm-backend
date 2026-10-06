@@ -61,7 +61,7 @@ def test_activation_token_sets_password_once_and_is_not_returned_by_webhook() ->
         "rules_consent": True,
         "privacy_consent": True,
         "members": [
-            {"role": "leader", "full_name": "Leader", "email": email, "phone": "9812345678", "college": "Adamas University", "is_acm_member": True},
+            {"role": "leader", "full_name": "Leader", "email": email, "phone": "9812345678", "college": "Adamas University", "is_acm_member": True, "acm_id": "ACM123"},
             {"role": "member", "full_name": "Member", "email": f"member-{uuid4()}@example.com", "phone": "9812345679", "college": "Other", "is_acm_member": False},
         ],
     })
@@ -70,7 +70,7 @@ def test_activation_token_sets_password_once_and_is_not_returned_by_webhook() ->
     body = json.dumps({
         "id": f"evt_{uuid4().hex}",
         "event": "payment.captured",
-        "payload": {"payment": {"entity": {"id": "pay_test", "order_id": payments.order.order_id, "amount": verified.json()["amount"], "currency": "INR", "status": "captured"}}},
+        "payload": {"payment": {"entity": {"id": f"pay_{uuid4().hex[:14]}", "order_id": payments.order.order_id, "amount": verified.json()["amount"], "currency": "INR", "status": "captured"}}},
     }).encode()
     signature = hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()
     webhook = client.post("/api/v1/payments/razorpay/webhook", content=body, headers={"X-Razorpay-Signature": signature, "X-Razorpay-Event-Id": json.loads(body)["id"]})

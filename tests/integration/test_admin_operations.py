@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -15,6 +16,8 @@ from src.auth.policies import RoleCode
 from src.auth.security import hash_password
 from src.db.models.identity import AuditLog, Role, User, UserStatus
 from src.db.models.registration import (
+    PaymentAttempt,
+    Refund,
     PaymentOrder,
     Registration,
     RegistrationMember,
@@ -203,7 +206,8 @@ def test_judge_cannot_read_identity_bearing_admin_tables() -> None:
 def test_overview_uses_captured_money_and_shared_recent_rows() -> None:
     client = _client()
     admin_email = f"admin-{uuid4()}@example.com"
-    created_at = datetime(2200, 1, 1, tzinfo=UTC) + timedelta(days=uuid4().int % 365)
+    # Strictly later than any earlier run's seed, so this row is always among the 10 most recent.
+    created_at = datetime(2200, 1, 1, tzinfo=UTC) + timedelta(seconds=time.time())
     with Session(create_engine(TEST_DATABASE_URL)) as session:
         admin = User(
             email_normalized=admin_email,
@@ -263,16 +267,35 @@ def test_overview_uses_captured_money_and_shared_recent_rows() -> None:
         )
         session.commit()
         expected_metrics = {
-            "registrations": session.scalar(select(func.count(Registration.id))),
+            "registrations": session.scalar(
+                select(func.count(Registration.id)).where(
+                    Registration.status.in_(("PAYMENT_PENDING", "PAID", "REFUNDED"))
+                )
+            ),
+            "paid_teams": session.scalar(
+                select(func.count(Registration.id)).where(Registration.status == "PAID")
+            ),
+            # Net of processed refunds of captured payments.
             "monetary_amount_minor": session.scalar(
                 select(func.coalesce(func.sum(PaymentOrder.amount_minor), 0)).where(
                     PaymentOrder.status == "CAPTURED"
                 )
+            )
+            # Refunds of review payments were never counted as collected, so only
+            # refunds of fulfilling payments are subtracted.
+            - session.scalar(
+                select(func.coalesce(func.sum(Refund.amount_minor), 0))
+                .join(PaymentAttempt, PaymentAttempt.id == Refund.payment_attempt_id)
+                .where(Refund.status == "PROCESSED", PaymentAttempt.status == "CAPTURED")
             ),
+            # Finalized submissions, not paid registrations.
             "submissions": session.scalar(
-                select(func.count(Registration.id)).where(Registration.status == "PAID")
+                select(func.count(Submission.id)).where(Submission.status == "SUBMITTED")
             ),
             "total_users": session.scalar(select(func.count(User.id))),
+            "payments_needing_review": session.scalar(
+                select(func.count(PaymentAttempt.id)).where(PaymentAttempt.status == "NEEDS_REVIEW")
+            ),
         }
 
     response = client.get(

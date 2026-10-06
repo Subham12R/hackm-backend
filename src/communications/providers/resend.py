@@ -6,9 +6,9 @@ class ResendEmailSender:
         self.api_key = api_key
         self.sender = sender
 
-    def send(self, recipient: str, subject: str, html: str) -> None:
+    def send(self, recipient: str, subject: str, html: str):
         resend.api_key = self.api_key
-        resend.Emails.send({
+        return resend.Emails.send({
             "from": self.sender,
             "to": [recipient],
             "subject": subject,

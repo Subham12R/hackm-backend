@@ -68,17 +68,18 @@ def test_checkout_confirmation_fulfills_only_a_captured_signed_payment() -> None
         "rules_consent": True,
         "privacy_consent": True,
         "members": [
-            {"role": "leader", "full_name": "Leader", "email": email, "phone": "9812345678", "college": "Adamas University", "is_acm_member": True},
+            {"role": "leader", "full_name": "Leader", "email": email, "phone": "9812345678", "college": "Adamas University", "is_acm_member": True, "acm_id": "ACM123"},
             {"role": "member", "full_name": "Member", "email": f"m-{uuid4()}@example.com", "phone": "9812345679", "college": "Other", "is_acm_member": False},
         ],
     })
     assert created.status_code == 202
+    pay_ok = f"pay_{uuid4().hex[:14]}"
     bad = client.post("/api/v1/payments/razorpay/confirm", json={"razorpay_order_id": payments.order.order_id, "razorpay_payment_id": "pay_bad", "razorpay_signature": "bad"})
     assert bad.status_code == 400
-    confirmed = client.post("/api/v1/payments/razorpay/confirm", json={"razorpay_order_id": payments.order.order_id, "razorpay_payment_id": "pay_ok", "razorpay_signature": "good"})
-    again = client.post("/api/v1/payments/razorpay/confirm", json={"razorpay_order_id": payments.order.order_id, "razorpay_payment_id": "pay_ok", "razorpay_signature": "good"})
+    confirmed = client.post("/api/v1/payments/razorpay/confirm", json={"razorpay_order_id": payments.order.order_id, "razorpay_payment_id": pay_ok, "razorpay_signature": "good"})
+    again = client.post("/api/v1/payments/razorpay/confirm", json={"razorpay_order_id": payments.order.order_id, "razorpay_payment_id": pay_ok, "razorpay_signature": "good"})
     assert confirmed.status_code == 200
-    assert confirmed.json() == {"status": "paid"}
+    assert confirmed.json() == {"status": "paid", "purpose": "REGISTRATION"}
     assert again.status_code == 200
     assert sum(message[1] == "Activate your HackMatrix account" for message in sink.messages) == 1
     with Session(create_engine(TEST_DATABASE_URL)) as session:
