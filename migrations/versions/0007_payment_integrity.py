@@ -98,12 +98,14 @@ def upgrade() -> None:
 def _resolve_active_duplicates() -> None:
     """Keep the strongest active registration per team name / leader; abandon unpaid extras.
 
-    Two PAID rows for the same key cannot be fixed automatically and stop the migration.
+    The old constraint was case-sensitive, so two paid teams can differ only by case; later ones
+    get a numbered name. Two paid rows for one leader email may be a double payment and stop the
+    migration for a manual decision.
     """
     bind = op.get_bind()
     for key in ("lower(team_name)", "leader_email"):
         rows = bind.execute(sa.text(
-            f"SELECT id, status, {key} AS dup_key, event_id FROM registrations WHERE status IN {ACTIVE} "
+            f"SELECT id, status, team_name, leader_email, created_at, {key} AS dup_key, event_id FROM registrations WHERE status IN {ACTIVE} "
             f"AND (event_id, {key}) IN (SELECT event_id, {key} FROM registrations WHERE status IN {ACTIVE} GROUP BY event_id, {key} HAVING count(*) > 1) "
             "ORDER BY event_id, dup_key, (status = 'PAID') DESC, created_at DESC"
         )).all()
@@ -111,12 +113,33 @@ def _resolve_active_duplicates() -> None:
         for row in rows:
             groups.setdefault((row.event_id, row.dup_key), []).append(row)
         for group in groups.values():
-            if sum(row.status == "PAID" for row in group) > 1:
-                ids = ", ".join(str(row.id) for row in group)
-                raise RuntimeError(f"Multiple PAID registrations share {key}: {ids}. Resolve manually before migrating.")
-            for row in group[1:]:
-                bind.execute(sa.text("UPDATE registrations SET status = 'ABANDONED' WHERE id = :id"), {"id": row.id})
-                bind.execute(sa.text("UPDATE payment_orders SET status = 'CANCELLED' WHERE registration_id = :id AND status = 'CREATED'"), {"id": row.id})
+            paid = sorted((row for row in group if row.status == "PAID"), key=lambda row: row.created_at)
+            if len(paid) > 1 and key == "leader_email":
+                details = "; ".join(f"{row.id} '{row.team_name}' registered {row.created_at:%Y-%m-%d %H:%M}" for row in paid)
+                raise RuntimeError(
+                    f"Leader {group[0].leader_email} has {len(paid)} PAID registrations ({details}). This may be a double payment: "
+                    "refund one and set its status to 'REFUNDED', or give it a different leader_email, then redeploy."
+                )
+            for row in paid[1:]:
+                _rename_team(bind, row)
+            keep = paid[0] if paid else group[0]
+            for row in group:
+                if row.status != "PAID" and row.id != keep.id:
+                    bind.execute(sa.text("UPDATE registrations SET status = 'ABANDONED' WHERE id = :id"), {"id": row.id})
+                    bind.execute(sa.text("UPDATE payment_orders SET status = 'CANCELLED' WHERE registration_id = :id AND status = 'CREATED'"), {"id": row.id})
+
+
+def _rename_team(bind, row) -> None:
+    taken = {name.lower() for name in bind.execute(sa.text("SELECT team_name FROM registrations WHERE event_id = :event"), {"event": row.event_id}).scalars()}
+    number = 2
+    while True:
+        suffix = f" ({number})"
+        name = row.team_name[: 200 - len(suffix)].rstrip() + suffix
+        if name.lower() not in taken:
+            break
+        number += 1
+    bind.execute(sa.text("UPDATE registrations SET team_name = :name WHERE id = :id"), {"name": name, "id": row.id})
+    print(f"0007: paid team {row.id} renamed '{row.team_name}' -> '{name}' (name differed from another paid team only by case)")
 
 
 def _backfill_prices_and_categories() -> None:
