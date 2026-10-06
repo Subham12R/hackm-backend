@@ -1,19 +1,26 @@
+import os
 from html import escape
 
-# Soft "moodboard" palette: warm linen page, white card, pastel accents, near-black ink.
-PAGE = "#f4efe8"
+# Palette taken from the HackMatrix 26 banner: cream page, white card, red-orange accent, near-black ink.
+PAGE = "#fbf1e4"
 INK = "#1f1a17"
 BODY = "#57534e"
 MUTED = "#8a817a"
 PANEL = "#faf6f0"
-RULE = "#ece3d6"
-ACCENT = "#c2410c"
-PASTELS = ("#f9d5c0", "#cfdcc8", "#f6e3a1", "#dcd3ef", "#e8b89a", "#c9dbe3")
+RULE = "#f0e2d0"
+ACCENT = "#e8452c"
+ACCENT_SOFT = "#fde0d6"
+# Tints of the banner's red-orange and cream for the numbered steps and footer dots.
+TINTS = ("#fde0d6", "#fbe9d0", "#f9cfc2")
 SANS = "'Helvetica Neue',Helvetica,Arial,sans-serif"
 SERIF = "Georgia,'Times New Roman',serif"
 
-# Tile heights for the masonry strip at the top of the card.
-STRIP = (54, 86, 64, 96, 58, 78)
+BANNER_ALT = "HackMatrix 26 · Hack Day · 14 Nov 2026 · Adamas University"
+
+
+def banner_url() -> str:
+    """The banner is hosted by the participant site; EMAIL_BANNER_URL overrides it (staging, previews)."""
+    return os.getenv("EMAIL_BANNER_URL") or f"{os.getenv('PARTICIPANT_APP_URL', 'http://localhost:3000').rstrip('/')}/email/hackmatrix-26-banner.gif"
 
 
 def _text(value: str) -> str:
@@ -21,12 +28,12 @@ def _text(value: str) -> str:
     return escape(value).replace("\r\n", "\n").replace("\n", "<br>")
 
 
-def _strip() -> str:
-    cells = "".join(
-        f'<td valign="bottom" style="padding:0 4px;"><div style="height:{height}px;background:{color};border-radius:18px;font-size:0;line-height:0;">&nbsp;</div></td>'
-        for height, color in zip(STRIP, PASTELS)
+def _banner() -> str:
+    site = escape(os.getenv("PARTICIPANT_APP_URL", "https://hackmatrix.codes"), quote=True)
+    return (
+        f'<a href="{site}" style="text-decoration:none;"><img src="{escape(banner_url(), quote=True)}" width="564" alt="{escape(BANNER_ALT, quote=True)}" '
+        f'style="display:block;width:100%;max-width:564px;height:auto;border:0;border-radius:20px;background:{PAGE};font-family:{SANS};font-size:14px;line-height:1.4;color:{ACCENT};"></a>'
     )
-    return f'<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="table-layout:fixed;"><tr>{cells}</tr></table>'
 
 
 def _details(rows: list[tuple[str, str]], original_amount: str | None) -> str:
@@ -53,7 +60,7 @@ def _steps(steps: list[str]) -> str:
     items = "".join(
         f"""<tr>
           <td style="width:44px;padding:0 0 14px;vertical-align:top;">
-            <div style="width:30px;height:30px;border-radius:15px;background:{PASTELS[(index - 1) % len(PASTELS)]};text-align:center;font-family:{SANS};font-size:13px;font-weight:700;line-height:30px;color:{INK};">{index}</div>
+            <div style="width:30px;height:30px;border-radius:15px;background:{TINTS[(index - 1) % len(TINTS)]};text-align:center;font-family:{SANS};font-size:13px;font-weight:700;line-height:30px;color:{INK};">{index}</div>
           </td>
           <td style="padding:5px 0 14px;font-family:{SANS};font-size:15px;line-height:1.55;color:{BODY};">{escape(step)}</td>
         </tr>"""
@@ -89,7 +96,7 @@ def action_email(
       @media (max-width:620px) {{
         .card {{ padding:30px 22px !important; }}
         .headline {{ font-size:28px !important; }}
-        .strip td {{ padding:0 2px !important; }}
+        .banner {{ padding:12px 12px 0 !important; }}
       }}
     </style>
   </head>
@@ -110,10 +117,10 @@ def action_email(
             <tr>
               <td style="background:#ffffff;border-radius:28px;box-shadow:0 18px 40px rgba(31,26,23,0.08);">
                 <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
-                  <tr><td class="strip" style="padding:22px 18px 0;">{_strip()}</td></tr>
+                  <tr><td class="banner" style="padding:18px 18px 0;">{_banner()}</td></tr>
                   <tr>
                     <td class="card" style="padding:34px 40px 40px;">
-                      <span style="display:inline-block;padding:6px 14px;border-radius:999px;background:#fde7d9;font-family:{SANS};font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:{ACCENT};">{escape(eyebrow)}</span>
+                      <span style="display:inline-block;padding:6px 14px;border-radius:999px;background:{ACCENT_SOFT};font-family:{SANS};font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:{ACCENT};">{escape(eyebrow)}</span>
                       <h1 class="headline" style="margin:18px 0 0;font-family:{SERIF};font-size:34px;font-weight:400;line-height:1.18;letter-spacing:-0.5px;color:{INK};">{escape(title)}</h1>
                       <p style="margin:16px 0 0;font-family:{SANS};font-size:16px;line-height:1.7;color:{BODY};">{_text(intro)}</p>
                       {_details(rows, original_amount)}
@@ -132,7 +139,7 @@ def action_email(
             </tr>
             <tr>
               <td align="center" style="padding:26px 12px 0;font-family:{SANS};font-size:12px;line-height:1.7;color:{MUTED};">
-                <span style="color:{PASTELS[0]};">&#9679;</span>&nbsp;<span style="color:{PASTELS[1]};">&#9679;</span>&nbsp;<span style="color:{PASTELS[3]};">&#9679;</span><br>
+                <span style="color:{ACCENT};">&#10022;</span>&nbsp;<span style="color:{TINTS[2]};">&#9679;</span>&nbsp;<span style="color:{ACCENT};">&#10022;</span><br>
                 Made with care by ACM Student Chapter, Adamas University &middot; Kolkata<br>
                 If you did not expect this message, you can safely ignore it.
               </td>
