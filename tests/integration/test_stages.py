@@ -84,6 +84,8 @@ def test_finalists_move_on_to_the_next_event_after_the_online_round(stages_clean
     tracks = [harness.client.post(f"/api/v1/admin/stages/{finals['id']}/tracks", headers=admin, json={"title": title, "body": f"{title} brief"}).json()
               for title in ("Health", "Climate")]
     draft = _finals(harness, admin, stages_cleanup, name="Side quest", eligibility="ALL_PAID", published=False)
+    renamed = harness.client.patch(f"/api/v1/admin/stages/{draft['id']}", headers=admin, json={"name": "Side Quest", "description": "Bonus"})
+    assert renamed.status_code == 200 and renamed.json()["name"] == "Side Quest"
 
     # A finalist sees both events and lands on the finals; everyone else only sees the online round.
     listed = harness.client.get("/api/v1/participant/stages", headers=finalist).json()

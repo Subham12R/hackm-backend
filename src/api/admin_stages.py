@@ -143,7 +143,7 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
             _ensure_order(stage)
             if changes:
                 stage.updated_at, stage.updated_by_user_id = datetime.now(UTC), actor.id
-                audit(session, actor, "Updated event stage", "stage", stage.id, name=stage.name, **changes)
+                audit(session, actor, "Updated event stage", "stage", stage.id, event=stage.name, **changes)
                 session.commit()
                 request.app.state.cache.invalidate(PUBLIC_EVENT, ADMIN_AGGREGATES)
             return _stage_payload(session, stage, datetime.now(UTC))
