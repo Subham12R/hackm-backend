@@ -7,6 +7,7 @@ Credentials come from the standard AWS chain (AWS_ACCESS_KEY_ID / AWS_SECRET_ACC
 an instance role, ...); nothing secret is stored here.
 """
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Protocol
@@ -117,7 +118,9 @@ def storage_from_env() -> S3Storage | None:
         endpoint = os.getenv("R2_ENDPOINT_URL") or (account_id and f"https://{account_id}.r2.cloudflarestorage.com")
         public_url = os.getenv("R2_PUBLIC_URL")
         if not endpoint or not public_url:
-            raise RuntimeError("R2_BUCKET needs R2_ACCOUNT_ID (or R2_ENDPOINT_URL) and R2_PUBLIC_URL")
+            # Incomplete settings switch the gallery off rather than keeping the whole API from starting.
+            logging.getLogger(__name__).warning("gallery storage off: R2_BUCKET needs R2_ACCOUNT_ID (or R2_ENDPOINT_URL) and R2_PUBLIC_URL")
+            return None
         return S3Storage(bucket, "auto", public_url, endpoint, os.getenv("R2_ACCESS_KEY_ID"), os.getenv("R2_SECRET_ACCESS_KEY"))
     bucket = os.getenv("S3_BUCKET")
     if not bucket:

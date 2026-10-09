@@ -1,7 +1,5 @@
 from uuid import uuid4
 
-import pytest
-
 from src.auth.policies import RoleCode
 from src.storage.s3 import StoredObject
 from tests.helpers import Harness, staff
@@ -192,5 +190,4 @@ def test_r2_settings_build_an_r2_store(monkeypatch):
     assert store.public_url("gallery/a.webp") == "https://pub-1.r2.dev/gallery/a.webp"
 
     monkeypatch.delenv("R2_PUBLIC_URL")
-    with pytest.raises(RuntimeError):
-        storage_from_env()
+    assert storage_from_env() is None
