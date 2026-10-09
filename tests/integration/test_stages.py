@@ -74,6 +74,7 @@ def test_finalists_move_on_to_the_next_event_after_the_online_round(stages_clean
     with db() as session:
         first = default_stage(session, ACTIVE_EVENT_ID)
         first.submission_closes_at = datetime.now(UTC) - timedelta(minutes=1)
+        first_id = str(first.id)
         session.commit()
 
     assert harness.client.post("/api/v1/admin/stages", headers=viewer, json={"name": "x"}).status_code == 403
@@ -89,14 +90,14 @@ def test_finalists_move_on_to_the_next_event_after_the_online_round(stages_clean
 
     # A finalist sees both events and lands on the finals; everyone else only sees the online round.
     listed = harness.client.get("/api/v1/participant/stages", headers=finalist).json()
-    assert [stage["name"] for stage in listed["stages"]] == ["Main round", "Grand Finale"]
+    assert [stage["id"] for stage in listed["stages"]] == [first_id, finals["id"]]
     assert listed["current_stage_id"] == finals["id"]
-    finals_view = listed["stages"][1]
+    online_view, finals_view = listed["stages"]
     assert [track["title"] for track in finals_view["tracks"]] == ["Health", "Climate"] and finals_view["submission"]["status"] == "NOT_STARTED"
-    assert listed["stages"][0]["submission"]["status"] == "SUBMITTED"
+    assert online_view["submission"]["status"] == "SUBMITTED"
     assert harness.client.get("/api/v1/participant/dashboard", headers=finalist).json()["event"]["stage"]["name"] == "Grand Finale"
     others = harness.client.get("/api/v1/participant/stages", headers=other).json()
-    assert [stage["name"] for stage in others["stages"]] == ["Main round"]
+    assert [stage["id"] for stage in others["stages"]] == [first_id]
     assert harness.client.put(f"/api/v1/participant/stages/{finals['id']}/submission", headers=other, json=_project()).status_code == 404
     assert harness.client.put(f"/api/v1/participant/stages/{draft['id']}/submission", headers=finalist, json=_project()).status_code == 404
 
@@ -113,7 +114,7 @@ def test_finalists_move_on_to_the_next_event_after_the_online_round(stages_clean
 
     # Problem statements stay hidden until their reveal time.
     harness.client.patch(f"/api/v1/admin/stages/{finals['id']}", headers=admin, json={"statements_release_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()})
-    hidden = harness.client.get("/api/v1/participant/stages", headers=finalist).json()["stages"][1]
+    hidden = harness.client.get("/api/v1/participant/stages", headers=finalist).json()["stages"][-1]
     assert hidden["tracks"] == [] and hidden["statements"] == {"release_at": hidden["statements"]["release_at"], "released": False, "count": 2}
 
     # Events with submissions are kept; empty ones can go, but never the last one.
