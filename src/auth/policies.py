@@ -28,3 +28,5 @@ ASSIGNMENT_ROLES = frozenset({RoleCode.SUPER_ADMIN, RoleCode.EVENT_ADMIN, RoleCo
 EVENT_CONTROL_ROLES = frozenset({RoleCode.SUPER_ADMIN, RoleCode.EVENT_ADMIN})
 SUPPORT_ROLES = frozenset({RoleCode.SUPER_ADMIN, RoleCode.EVENT_ADMIN, RoleCode.SUPPORT_ADMIN})
 MONEY_ROLES = frozenset({RoleCode.SUPER_ADMIN})
+# Desk staff who mark arrivals at the finals venue.
+CHECKIN_ROLES = frozenset({RoleCode.SUPER_ADMIN, RoleCode.EVENT_ADMIN, RoleCode.REGISTRATION_ADMIN, RoleCode.SUPPORT_ADMIN})

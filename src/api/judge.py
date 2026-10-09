@@ -35,7 +35,7 @@ def judge_router(public_key: Ed25519PublicKey) -> APIRouter:
             rows = session.execute(
                 select(EvaluationAssignment, EvaluationRound, Submission, Scorecard)
                 .join(EvaluationRound, EvaluationRound.id == EvaluationAssignment.round_id)
-                .join(Submission, Submission.registration_id == EvaluationAssignment.registration_id)
+                .join(Submission, (Submission.registration_id == EvaluationAssignment.registration_id) & (Submission.stage_id == EvaluationRound.stage_id))
                 .outerjoin(Scorecard, Scorecard.assignment_id == EvaluationAssignment.id)
                 .where(EvaluationAssignment.judge_user_id == user.id)
                 .order_by(EvaluationRound.sequence, Submission.anonymous_code)
@@ -87,7 +87,7 @@ def _load(session, assignment_id: UUID, judge_id, lock: bool = False):
     query = (
         select(EvaluationAssignment, EvaluationRound, Submission, Scorecard)
         .join(EvaluationRound, EvaluationRound.id == EvaluationAssignment.round_id)
-        .join(Submission, Submission.registration_id == EvaluationAssignment.registration_id)
+        .join(Submission, (Submission.registration_id == EvaluationAssignment.registration_id) & (Submission.stage_id == EvaluationRound.stage_id))
         .outerjoin(Scorecard, Scorecard.assignment_id == EvaluationAssignment.id)
         .where(EvaluationAssignment.id == assignment_id, EvaluationAssignment.judge_user_id == judge_id)
     )

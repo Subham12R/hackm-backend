@@ -6,7 +6,6 @@ from src.db.models.registration import Event
 
 WINDOWS = {
     "registration": ("registration_opens_at", "registration_closes_at"),
-    "submission": ("submission_opens_at", "submission_closes_at"),
 }
 
 
@@ -26,7 +25,3 @@ def ensure_window_open(event: Event, kind: str, now: datetime) -> None:
         raise HTTPException(403, f"{kind} is not open yet")
     if state == "CLOSED":
         raise HTTPException(403, f"{kind} is closed")
-
-
-def challenge_released(event: Event, now: datetime) -> bool:
-    return event.challenge_release_at is not None and now >= event.challenge_release_at

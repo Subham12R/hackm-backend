@@ -28,6 +28,8 @@ from src.db.models.registration import (
     RegistrationMember,
     Submission,
 )
+from src.db.models.stage import SubmissionAward
+from src.events import stages as stage_rules
 from src.events.service import ACTIVE_EVENT_ID, current_event
 from src.judging import service as judging
 from src.operations import submission_label, team_code
@@ -114,13 +116,14 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
         category: RegistrationCategory | None = None,
         status: Literal["PAYMENT_PENDING", "PAID", "REFUNDED", "ABANDONED", "ALL"] | None = None,
         search: str | None = Query(None, max_length=100),
+        finals: Literal["PENDING", "ACCEPTED", "DECLINED"] | None = None,
         page: int = Query(1, ge=1),
         page_size: int = Query(10, ge=1, le=100),
     ):
         session, _user = admin_user(request, authorization)
         with session:
             timezone = current_event(session).timezone
-            rows, total, daily = _page(session, timezone, registered_on, category, status, search, page, page_size)
+            rows, total, daily = _page(session, timezone, registered_on, category, status, search, page, page_size, finals)
             return {"items": _team_rows(session, rows, timezone), "total": total, "page": page, "page_size": page_size, "daily_counts": daily}
 
     @router.post("/teams/{registration_id}/review")
@@ -152,16 +155,28 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
             return {"evaluators": [{**_evaluator_row(judge), "assignments": int(load.get(judge.id, 0))} for judge in judges]}
 
     @router.get("/submissions")
-    def list_submissions(request: Request, authorization: str = Header()):
+    def list_submissions(
+        request: Request,
+        authorization: str = Header(),
+        stage_id: UUID | None = None,
+        track_id: UUID | None = None,
+    ):
         session, _user = admin_user(request, authorization)
         with session:
-            round_ = judging.current_round(session)
-            pairs = session.execute(
+            stage = stage_rules.get_stage(session, stage_id, ACTIVE_EVENT_ID) if stage_id else stage_rules.default_stage(session, ACTIVE_EVENT_ID)
+            stage_tracks = stage_rules.tracks(session, stage.id)
+            track_names = {track.id: track.title for track in stage_tracks}
+            round_ = judging.current_round(session, stage.id)
+            query = (
                 select(Registration, Submission)
-                .outerjoin(Submission, Submission.registration_id == Registration.id)
+                .outerjoin(Submission, (Submission.registration_id == Registration.id) & (Submission.stage_id == stage.id))
                 .where(Registration.event_id == ACTIVE_EVENT_ID, Registration.status == "PAID")
-                .order_by(Registration.created_at.desc())
-            ).tuples().all()
+            )
+            if stage.eligibility == "FINALISTS":
+                query = query.where(Registration.finals_status == "ACCEPTED")
+            if track_id is not None:
+                query = query.where(Submission.track_id == track_id)
+            pairs = session.execute(query.order_by(Registration.created_at.desc())).tuples().all()
             assignments: dict = {}
             submitted_cards: dict = {}
             if round_ is not None:
@@ -175,19 +190,26 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
                         {**_evaluator_row(judge), "assignment_id": str(assignment.id), "scorecard_status": card_status or "NOT_STARTED"}
                     )
             for registration_id, count in session.execute(
-                select(Scorecard.registration_id, func.count(Scorecard.id)).where(Scorecard.status == "SUBMITTED").group_by(Scorecard.registration_id)
+                select(Scorecard.registration_id, func.count(Scorecard.id))
+                .join(EvaluationRound, EvaluationRound.id == Scorecard.round_id)
+                .where(Scorecard.status == "SUBMITTED", EvaluationRound.stage_id == stage.id).group_by(Scorecard.registration_id)
             ).all():
                 submitted_cards[registration_id] = count
+            awards: dict = {}
+            for award in session.scalars(select(SubmissionAward).where(SubmissionAward.stage_id == stage.id).order_by(SubmissionAward.placement)):
+                awards.setdefault(award.submission_id, []).append(_award_row(award, track_names))
             rows = []
             for registration, submission in pairs:
                 judges = assignments.get(registration.id, [])
                 rows.append({
                     "team_id": team_code(registration.id),
                     "registration_id": str(registration.id),
+                    "submission_id": str(submission.id) if submission else None,
                     "team_name": registration.team_name,
                     "anonymous_code": submission.anonymous_code if submission else None,
                     "project_name": submission.project_name if submission else "",
                     "description": submission.description if submission else "",
+                    "track": {"id": str(submission.track_id), "title": track_names.get(submission.track_id, "")} if submission and submission.track_id else None,
                     "links": _submission_links(submission),
                     "start_time": registration.created_at.isoformat(),
                     "updated_at": submission.updated_at.isoformat() if submission and submission.updated_at else None,
@@ -198,15 +220,21 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
                     "assigned_to": judges[0] if judges else None,
                     "judges": judges,
                     "can_assign": submission is not None and submission.status == "SUBMITTED",
+                    "awards": awards.get(submission.id, []) if submission else [],
                 })
-            return {"submissions": rows, "round": _round_row(round_) if round_ else None}
+            return {
+                "submissions": rows, "round": _round_row(round_) if round_ else None,
+                "stage": {"id": str(stage.id), "name": stage.name, "eligibility": stage.eligibility},
+                "tracks": [{"id": str(track.id), "title": track.title} for track in stage_tracks],
+            }
 
     @router.post("/submissions/{registration_id}/assign")
-    def assign_submission(registration_id: UUID, payload: AssignRequest, request: Request, authorization: str = Header()):
-        """Assign one judge in the current round (kept for the single-judge admin control)."""
+    def assign_submission(registration_id: UUID, payload: AssignRequest, request: Request, authorization: str = Header(), stage_id: UUID | None = None):
+        """Assign one judge in the stage's current round (kept for the single-judge admin control)."""
         session, actor = admin_user(request, authorization, ASSIGNMENT_ROLES)
         with session:
-            submission = session.scalar(select(Submission).where(Submission.registration_id == registration_id))
+            stage = stage_rules.get_stage(session, stage_id, ACTIVE_EVENT_ID) if stage_id else stage_rules.default_stage(session, ACTIVE_EVENT_ID)
+            submission = session.scalar(select(Submission).where(Submission.registration_id == registration_id, Submission.stage_id == stage.id))
             judge = session.scalar(
                 select(User).join(User.roles).where(
                     User.email_normalized == payload.assignee_email.strip().lower(), User.status == UserStatus.ACTIVE, Role.code == RoleCode.JUDGE,
@@ -216,7 +244,7 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
                 raise HTTPException(404, "submission assignment not found")
             if submission.status != "SUBMITTED":
                 raise HTTPException(409, "submission is not ready for assignment")
-            round_ = judging.current_round(session, create=True)
+            round_ = judging.current_round(session, stage.id, create=True)
             if round_.status == "CLOSED":
                 raise HTTPException(409, "the current round is closed")
             if not judging.is_eligible(session, round_, registration_id):
@@ -231,18 +259,22 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
             return {"assigned_to": _evaluator_row(judge)}
 
     @router.post("/submissions/{registration_id}/reopen")
-    def reopen_submission(registration_id: UUID, request: Request, authorization: str = Header()):
+    def reopen_submission(registration_id: UUID, request: Request, authorization: str = Header(), stage_id: UUID | None = None):
         session, actor = admin_user(request, authorization, EVENT_CONTROL_ROLES)
         with session:
-            submission = session.scalar(select(Submission).where(Submission.registration_id == registration_id).with_for_update())
+            stage = stage_rules.get_stage(session, stage_id, ACTIVE_EVENT_ID) if stage_id else stage_rules.default_stage(session, ACTIVE_EVENT_ID)
+            submission = session.scalar(select(Submission).where(Submission.registration_id == registration_id, Submission.stage_id == stage.id).with_for_update())
             if submission is None or submission.status != "SUBMITTED":
                 raise HTTPException(409, "only a final submission can be reopened")
-            if session.scalar(select(Scorecard.id).where(Scorecard.registration_id == registration_id, Scorecard.status == "SUBMITTED")) is not None:
+            if session.scalar(
+                select(Scorecard.id).join(EvaluationRound, EvaluationRound.id == Scorecard.round_id)
+                .where(Scorecard.registration_id == registration_id, Scorecard.status == "SUBMITTED", EvaluationRound.stage_id == stage.id)
+            ) is not None:
                 raise HTTPException(409, "reopen its submitted evaluations first")
             submission.status = "DRAFT"
             submission.version += 1
             submission.updated_at = datetime.now(UTC)
-            audit(session, actor, "Reopened submission", "submission", team_code(registration_id))
+            audit(session, actor, "Reopened submission", "submission", team_code(registration_id), event=stage.name)
             session.commit()
             request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             return {"status": submission.status}
@@ -313,9 +345,11 @@ def _backfill_categories(session: Session) -> None:
         session.commit()
 
 
-def _page(session, timezone, registered_on, category, status, search, page, page_size):
+def _page(session, timezone, registered_on, category, status, search, page, page_size, finals=None):
     _backfill_categories(session)
     filters = [Registration.event_id == ACTIVE_EVENT_ID]
+    if finals is not None:
+        filters.append(Registration.finals_status == finals)
     if status is None:
         filters.append(Registration.status.in_(LISTED_STATUSES))
     elif status != "ALL":
@@ -408,7 +442,12 @@ def _registration_rows(session, registrations: list[Registration], timezone: str
 def _team_rows(session, registrations: list[Registration], timezone: str) -> list[dict]:
     ids = [registration.id for registration in registrations]
     members = _members_by_registration(session, ids)
-    reviewer_ids = {registration.details_reviewed_by_user_id for registration in registrations if registration.details_reviewed_by_user_id}
+    reviewer_ids = {
+        user_id
+        for registration in registrations
+        for user_id in (registration.details_reviewed_by_user_id, registration.finals_decided_by_user_id)
+        if user_id
+    }
     reviewers = {user.id: user.display_name for user in session.scalars(select(User).where(User.id.in_(reviewer_ids)))} if reviewer_ids else {}
     rows = []
     for registration in registrations:
@@ -442,6 +481,11 @@ def _team_rows(session, registrations: list[Registration], timezone: str) -> lis
                 "status": registration.details_review_status,
                 "reviewed_at": registration.details_reviewed_at.isoformat() if registration.details_reviewed_at else None,
                 "reviewed_by": reviewers.get(registration.details_reviewed_by_user_id),
+            },
+            "finals": {
+                "status": registration.finals_status,
+                "decided_at": registration.finals_decided_at.isoformat() if registration.finals_decided_at else None,
+                "decided_by": reviewers.get(registration.finals_decided_by_user_id),
             },
         })
     return rows
@@ -493,6 +537,13 @@ def _submission_links(submission: Submission | None) -> list[dict]:
         )
         if href
     ]
+
+
+def _award_row(award: SubmissionAward, track_names: dict) -> dict:
+    return {
+        "id": str(award.id), "placement": award.placement, "label": award.label,
+        "track": {"id": str(award.track_id), "title": track_names.get(award.track_id, "")} if award.track_id else None,
+    }
 
 
 def _evaluator_row(user: User) -> dict:

@@ -16,7 +16,10 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.auth import auth_router
 from src.api.admin import admin_router
+from src.api.admin_checkin import admin_checkin_router
+from src.api.admin_stages import admin_stages_router
 from src.api.admin_event import admin_event_router
+from src.api.admin_gallery import admin_gallery_router
 from src.api.admin_judging import admin_judging_router
 from src.api.admin_ops import admin_ops_router
 from src.api.admin_payments import admin_payments_router
@@ -33,6 +36,7 @@ from src.communications.outbox import dispatch_pending
 from src.api.middleware import request_id_middleware
 from src.config import Settings, decode_pem_env
 from src.db.session import create_db_engine
+from src.storage.s3 import Storage, storage_from_env
 
 
 def create_app(
@@ -43,6 +47,7 @@ def create_app(
     payment_client=None,
     razorpay_webhook_secret: str | None = None,
     razorpay_key_id: str | None = None,
+    storage: Storage | None = None,
 ) -> FastAPI:
     settings = Settings(
         database_url=database_url
@@ -61,6 +66,7 @@ def create_app(
 
     app = FastAPI(title="HackMatrix API", lifespan=lifespan)
     app.state.cache = cache_from_env()
+    app.state.storage = storage or storage_from_env()
     app.state.database_url = settings.database_url
     app.state.razorpay_key_id = razorpay_key_id or os.getenv("RAZORPAY_KEY_ID")
     app.state.razorpay_webhook_secret = razorpay_webhook_secret or os.getenv("RAZORPAY_WEBHOOK_SECRET")
@@ -118,6 +124,9 @@ def create_app(
         app.include_router(admin_event_router(public_key))
         app.include_router(admin_judging_router(public_key))
         app.include_router(admin_ops_router(public_key))
+        app.include_router(admin_gallery_router(public_key))
+        app.include_router(admin_checkin_router(public_key))
+        app.include_router(admin_stages_router(public_key))
         app.include_router(judge_router(public_key))
 
     return app

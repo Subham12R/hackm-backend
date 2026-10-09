@@ -22,6 +22,9 @@ from src.db.models.judging import (
     Scorecard,
 )
 from src.db.models.registration import Registration
+from src.db.models.stage import Stage
+from src.events import stages as stage_rules
+from src.events.service import ACTIVE_EVENT_ID
 from src.judging import service as judging
 from src.operations import team_code
 
@@ -32,6 +35,8 @@ class RoundRequest(BaseModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
     scope: Literal["ALL_SUBMITTED", "SHORTLIST"] = "ALL_SUBMITTED"
     min_evaluations: int = Field(default=1, ge=1, le=20)
+    # The event (stage) whose submissions this round judges; the first one when left out.
+    stage_id: UUID | None = None
 
 
 class RoundUpdate(BaseModel):
@@ -86,7 +91,8 @@ def admin_judging_router(public_key: Ed25519PublicKey) -> APIRouter:
     def create_round(payload: RoundRequest, request: Request, authorization: str = Header()):
         session, actor = authenticated_user(request, authorization, public_key, ASSIGNMENT_ROLES)
         with session:
-            round_ = judging.create_round(session, payload.name, payload.scope, payload.min_evaluations)
+            stage_id = stage_rules.get_stage(session, payload.stage_id, ACTIVE_EVENT_ID).id if payload.stage_id else None
+            round_ = judging.create_round(session, payload.name, payload.scope, payload.min_evaluations, stage_id)
             audit(session, actor, "Created judging round", "round", round_.id, name=round_.name)
             session.commit()
             return _round_summary(session, round_)
@@ -368,8 +374,10 @@ def _round_summary(session, round_: EvaluationRound) -> dict:
     snapshot = session.scalar(select(ResultSnapshot.status).where(ResultSnapshot.round_id == round_.id))
     assignments = session.scalar(select(func.count(EvaluationAssignment.id)).where(EvaluationAssignment.round_id == round_.id)) or 0
     submitted = session.scalar(select(func.count(Scorecard.id)).where(Scorecard.round_id == round_.id, Scorecard.status == "SUBMITTED")) or 0
+    stage = session.get(Stage, round_.stage_id)
     return {
         "id": str(round_.id), "name": round_.name, "sequence": round_.sequence, "status": round_.status, "scope": round_.scope,
+        "stage": {"id": str(stage.id), "name": stage.name} if stage else None,
         "min_evaluations": round_.min_evaluations, "results_status": snapshot or "NONE",
         "assignments": int(assignments), "submitted_scorecards": int(submitted),
         "criteria": [

@@ -97,18 +97,42 @@ Registration and payments:
 Participant, prefix `/api/v1/participant`, leader access token required:
 
 - `GET /dashboard`
-- `PUT /submission`
-- `POST /submission/finalize`
+- `GET /stages` lists the events the team takes part in, their problem statements once revealed, and the team's submission for each
+- `PUT /stages/{stage_id}/submission` and `POST /stages/{stage_id}/submission/finalize` (send `track_id` to pick a problem statement)
+- `PUT /submission`, `POST /submission/finalize` and `GET /challenge` act on the team's current event, for older clients
 
 Admin, prefix `/api/v1/admin`, admin role required:
 
 - `GET /registrations`
 - `GET /teams`
-- `GET /submissions`
-- `POST /submissions/{registration_id}/assign`
+- `GET /stages`, `POST /stages`, `PATCH /stages/{id}`, `DELETE /stages/{id}` manage events (online round, finals, ...): schedule, who takes part (`ALL_PAID` or `FINALISTS`), published
+- `POST /stages/{id}/tracks`, `PUT /tracks/{id}`, `DELETE /tracks/{id}` manage an event's problem statements
+- `GET /submissions?stage_id=&track_id=` lists one event's submissions (the first event when left out)
+- `POST /submissions/{registration_id}/assign?stage_id=`
+- `POST /submissions/{submission_id}/awards` (`placement`, optional `label` and `track_id`) and `DELETE /awards/{id}` mark winners per event and per track
 - `GET /evaluations`
 - `POST /evaluations`
 - `GET /logs`
+- `POST /teams/{registration_id}/finals` accepts or declines a paid team for the finals
+- `GET /checkins` lists finals teams with members, arrival counts, and a 15-minute arrival timeline
+- `POST /checkins/members/{member_id}` and `POST /checkins/teams/{registration_id}` mark or undo arrivals
+- `GET /gallery`, `POST /gallery/uploads` (presigned S3 POST), `POST /gallery`, `PATCH /gallery/{id}`, `DELETE /gallery/{id}`
+
+Teams register and pay once; each event ("stage" in the code) has its own submission window, problem statements, submissions, judging rounds and winners. Migration `0012_stages` moves the existing schedule, challenge, submissions and rounds into a published "Main round". The event-level submission times and `/admin/challenge` now act on the first event.
+
+Public, prefix `/api/v1/public`: `GET /event`, `GET /leaderboard`, `GET /gallery`, `POST /contact`.
+
+## Photo gallery storage
+
+Gallery photos live in S3. Admins' browsers upload straight to the bucket with a presigned POST that S3 itself limits to 15 MB and JPEG, PNG, WebP or AVIF; the API then confirms the object exists before listing it.
+
+1. Create a bucket, for example `hackmatrix-gallery` in `ap-south-1`.
+2. Make `gallery/*` publicly readable (bucket policy `s3:GetObject` on `arn:aws:s3:::hackmatrix-gallery/gallery/*`, with "Block public access" relaxed for bucket policies), or put CloudFront in front and set `S3_PUBLIC_BASE_URL`.
+3. Add a CORS rule so the admin app can POST: allowed origin the admin URL, method `POST`, header `*`.
+4. Create an IAM user or role limited to `s3:PutObject`, `s3:GetObject`, and `s3:DeleteObject` on `arn:aws:s3:::hackmatrix-gallery/gallery/*`.
+5. Set `S3_BUCKET`, `S3_REGION`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY` in the server `.env`.
+
+Without `S3_BUCKET` the API still runs; the public gallery is empty and uploads answer 503.
 
 ## Deploy
 

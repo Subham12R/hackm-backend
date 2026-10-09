@@ -7,11 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.auth.rate_limits import is_limited
-from src.cache import PUBLIC_LEADERBOARD
+from src.cache import PUBLIC_GALLERY, PUBLIC_LEADERBOARD
 from src.db.models.contact import ContactMessage
 from src.db.models.judging import ResultRow
+from src.db.models.media import GalleryPhoto
 from src.db.session import create_db_engine
-from src.events.service import current_event, event_payload
+from src.events import stages as stage_rules
+from src.events.service import ACTIVE_EVENT_ID, current_event, event_payload
 from src.judging.service import released_snapshots
 
 router = APIRouter(prefix="/api/v1/public", tags=["public"])
@@ -34,8 +36,9 @@ def _session(request: Request) -> Session:
 def public_event(request: Request):
     with _session(request) as session:
         event = current_event(session)
+        now = datetime.now(UTC)
         # Windows and "now" are computed per request; only the stored config could be cached safely.
-        return event_payload(event, datetime.now(UTC))
+        return event_payload(event, now, stage_rules.current_stage(stage_rules.stages(session, event.id, published_only=True), now))
 
 
 @router.get("/leaderboard")
@@ -56,6 +59,29 @@ def public_leaderboard(request: Request):
             }
 
         return request.app.state.cache.get_or_set(PUBLIC_LEADERBOARD, "current", 60, produce)
+
+
+@router.get("/gallery")
+def public_gallery(request: Request):
+    storage = request.app.state.storage
+    if storage is None:
+        return {"items": []}
+    with _session(request) as session:
+        def produce() -> dict:
+            photos = session.scalars(
+                select(GalleryPhoto)
+                .where(GalleryPhoto.event_id == ACTIVE_EVENT_ID, GalleryPhoto.published)
+                .order_by(GalleryPhoto.created_at.desc())
+            ).all()
+            return {
+                "items": [
+                    {"id": str(photo.id), "url": storage.public_url(photo.object_key), "caption": photo.caption,
+                     "width": photo.width, "height": photo.height, "created_at": photo.created_at.isoformat()}
+                    for photo in photos
+                ]
+            }
+
+        return request.app.state.cache.get_or_set(PUBLIC_GALLERY, "all", 300, produce)
 
 
 @router.post("/contact", status_code=202)

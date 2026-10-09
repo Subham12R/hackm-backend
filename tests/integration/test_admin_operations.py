@@ -23,6 +23,7 @@ from src.db.models.registration import (
     RegistrationMember,
     Submission,
 )
+from src.events.stages import default_stage
 from src.main import create_app
 
 TEST_DATABASE_URL = os.getenv(
@@ -428,6 +429,7 @@ def test_assignment_requires_active_judge_and_evaluation_capability() -> None:
         session.add(
             Submission(
                 registration_id=registration.id,
+                stage_id=default_stage(session, registration.event_id).id,
                 status="SUBMITTED",
                 project_name="Project",
             )

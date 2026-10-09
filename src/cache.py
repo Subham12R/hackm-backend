@@ -65,3 +65,4 @@ def cache_from_env() -> Cache:
 ADMIN_AGGREGATES = "admin-aggregates"
 PUBLIC_EVENT = "public-event"
 PUBLIC_LEADERBOARD = "public-leaderboard"
+PUBLIC_GALLERY = "public-gallery"
