@@ -17,6 +17,7 @@ from src.db.models.judging import (
 )
 from src.db.models.registration import Registration, Submission
 from src.events.service import ACTIVE_EVENT_ID
+from src.events.stages import default_stage
 
 DEFAULT_CRITERIA = [
     ("innovation", "Innovation", 10, 1.0),
@@ -31,21 +32,26 @@ def criteria(session: Session, round_id) -> list[EvaluationCriterion]:
     return list(session.scalars(select(EvaluationCriterion).where(EvaluationCriterion.round_id == round_id).order_by(EvaluationCriterion.position)))
 
 
-def current_round(session: Session, create: bool = False) -> EvaluationRound | None:
-    """The round new assignments go to: the earliest OPEN round, else the latest DRAFT one."""
-    rounds = list(session.scalars(select(EvaluationRound).where(EvaluationRound.event_id == ACTIVE_EVENT_ID).order_by(EvaluationRound.sequence)))
+def current_round(session: Session, stage_id=None, create: bool = False) -> EvaluationRound | None:
+    """The round new assignments go to: the earliest OPEN round, else the latest DRAFT one (of one stage when given)."""
+    query = select(EvaluationRound).where(EvaluationRound.event_id == ACTIVE_EVENT_ID)
+    if stage_id is not None:
+        query = query.where(EvaluationRound.stage_id == stage_id)
+    rounds = list(session.scalars(query.order_by(EvaluationRound.sequence)))
     for status in ("OPEN", "DRAFT"):
         matches = [item for item in rounds if item.status == status]
         if matches:
             return matches[0] if status == "OPEN" else matches[-1]
     if not create or rounds:
         return rounds[-1] if rounds else None
-    return create_round(session, "Round 1", "ALL_SUBMITTED", 1)
+    return create_round(session, "Round 1", "ALL_SUBMITTED", 1, stage_id)
 
 
-def create_round(session: Session, name: str, scope: str, min_evaluations: int) -> EvaluationRound:
+def create_round(session: Session, name: str, scope: str, min_evaluations: int, stage_id=None) -> EvaluationRound:
     last = session.scalar(select(EvaluationRound.sequence).where(EvaluationRound.event_id == ACTIVE_EVENT_ID).order_by(EvaluationRound.sequence.desc()).limit(1))
-    round_ = EvaluationRound(event_id=ACTIVE_EVENT_ID, name=name, sequence=(last or 0) + 1, status="DRAFT", scope=scope, min_evaluations=min_evaluations)
+    stage_id = stage_id or default_stage(session, ACTIVE_EVENT_ID).id
+    round_ = EvaluationRound(event_id=ACTIVE_EVENT_ID, stage_id=stage_id, name=name, sequence=(last or 0) + 1, status="DRAFT",
+                             scope=scope, min_evaluations=min_evaluations)
     session.add(round_)
     session.flush()
     for position, (key, label, max_score, weight) in enumerate(DEFAULT_CRITERIA):
@@ -55,10 +61,10 @@ def create_round(session: Session, name: str, scope: str, min_evaluations: int) 
 
 
 def eligible_registrations(session: Session, round_: EvaluationRound) -> list[tuple[Registration, Submission]]:
-    """Paid teams with a finalized submission, limited to the shortlist for SHORTLIST rounds."""
+    """Paid teams with a finalized submission in the round's stage, limited to the shortlist for SHORTLIST rounds."""
     query = (
         select(Registration, Submission)
-        .join(Submission, Submission.registration_id == Registration.id)
+        .join(Submission, (Submission.registration_id == Registration.id) & (Submission.stage_id == round_.stage_id))
         .where(Registration.event_id == round_.event_id, Registration.status == "PAID", Submission.status == "SUBMITTED")
     )
     if round_.scope == "SHORTLIST":

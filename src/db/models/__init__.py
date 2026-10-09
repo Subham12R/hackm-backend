@@ -33,3 +33,4 @@ from src.db.models.judging import (  # noqa: F401
 )
 from src.db.models.contact import ContactMessage, ContactReply  # noqa: F401
 from src.db.models.media import GalleryPhoto  # noqa: F401
+from src.db.models.stage import Stage, SubmissionAward, Track  # noqa: F401

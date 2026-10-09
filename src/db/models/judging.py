@@ -14,6 +14,8 @@ class EvaluationRound(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     event_id: Mapped[UUID] = mapped_column(ForeignKey("events.id"), index=True)
+    # Rounds judge the submissions of one stage.
+    stage_id: Mapped[UUID] = mapped_column(ForeignKey("stages.id"), index=True)
     name: Mapped[str] = mapped_column(String(120))
     sequence: Mapped[int] = mapped_column(Integer)
     # DRAFT (setup) -> OPEN (judges score) -> CLOSED (scores frozen for results).

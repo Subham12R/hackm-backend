@@ -16,7 +16,9 @@ from src.cache import ADMIN_AGGREGATES, PUBLIC_EVENT
 from src.communications.outbox import dispatch_pending, queue_email
 from src.communications.templates import action_email
 from src.db.models.identity import User
-from src.db.models.registration import Announcement, AnnouncementRead, Challenge, Registration
+from src.db.models.registration import Announcement, AnnouncementRead, Registration
+from src.db.models.stage import Track
+from src.events import stages as stage_rules
 from src.events.service import current_event, event_payload
 from src.payments.service import app_url
 
@@ -56,6 +58,10 @@ class EventUpdate(BaseModel):
         return self
 
 
+# Older admin clients still send these on the event; they now belong to the first stage.
+STAGE_FIELDS = {"submission_opens_at": "submission_opens_at", "submission_closes_at": "submission_closes_at", "challenge_release_at": "statements_release_at"}
+
+
 class Resource(BaseModel):
     label: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
     url: Annotated[str, StringConstraints(max_length=500), AfterValidator(_web_link)]
@@ -91,40 +97,46 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
         session, actor = authenticated_user(request, authorization, public_key, EVENT_CONTROL_ROLES)
         with session:
             event = current_event(session, lock=True)
+            stage = stage_rules.default_stage(session, event.id, lock=True)
             changes = {}
             for field in payload.model_fields_set:
                 value = getattr(payload, field)
                 if field in ("name", "timezone") and value is None:
                     continue
-                if getattr(event, field) != value:
+                target, attribute = (stage, STAGE_FIELDS[field]) if field in STAGE_FIELDS else (event, field)
+                if getattr(target, attribute) != value:
                     changes[field] = value.isoformat() if isinstance(value, datetime) else value
-                    setattr(event, field, value)
-            for opens, closes in (("registration_opens_at", "registration_closes_at"), ("submission_opens_at", "submission_closes_at"), ("starts_at", "ends_at")):
-                if getattr(event, opens) and getattr(event, closes) and getattr(event, opens) >= getattr(event, closes):
+                    setattr(target, attribute, value)
+            for target, opens, closes in ((event, "registration_opens_at", "registration_closes_at"), (stage, "submission_opens_at", "submission_closes_at"), (event, "starts_at", "ends_at")):
+                if getattr(target, opens) and getattr(target, closes) and getattr(target, opens) >= getattr(target, closes):
                     raise HTTPException(422, f"{opens.replace('_', ' ')} must be before {closes.replace('_', ' ')}")
             if changes:
                 event.updated_at = datetime.now(UTC)
                 event.updated_by_user_id = actor.id
+                if changes.keys() & STAGE_FIELDS.keys():
+                    stage.updated_at, stage.updated_by_user_id = event.updated_at, actor.id
                 audit(session, actor, "Updated event control", "event", event.code, **changes)
                 session.commit()
                 request.app.state.cache.invalidate(PUBLIC_EVENT, ADMIN_AGGREGATES)
             return _event_admin_payload(session, event)
 
+    # The single-challenge endpoints edit the first stage's first problem statement, for clients that predate stages.
     @router.get("/challenge")
     def get_challenge(request: Request, authorization: str = Header()):
         session, _user = authenticated_user(request, authorization, public_key, ADMIN_READ_ROLES)
         with session:
-            event = current_event(session)
-            return _challenge_payload(session.scalar(select(Challenge).where(Challenge.event_id == event.id)), event)
+            stage = stage_rules.default_stage(session, current_event(session).id)
+            return _challenge_payload(next(iter(stage_rules.tracks(session, stage.id)), None), stage)
 
     @router.put("/challenge")
     def put_challenge(payload: ChallengeUpdate, request: Request, authorization: str = Header()):
         session, actor = authenticated_user(request, authorization, public_key, EVENT_CONTROL_ROLES)
         with session:
             event = current_event(session, lock=True)
-            challenge = session.scalar(select(Challenge).where(Challenge.event_id == event.id).with_for_update())
+            stage = stage_rules.default_stage(session, event.id, lock=True)
+            challenge = session.scalar(select(Track).where(Track.stage_id == stage.id).order_by(Track.position, Track.updated_at).limit(1).with_for_update())
             if challenge is None:
-                challenge = Challenge(event_id=event.id, version=0)
+                challenge = Track(stage_id=stage.id, position=1, version=0)
                 session.add(challenge)
             elif payload.version is not None and payload.version != challenge.version:
                 raise HTTPException(409, "the challenge was edited by someone else; reload first")
@@ -135,7 +147,7 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
             challenge.updated_by_user_id = actor.id
             audit(session, actor, "Updated challenge", "challenge", event.code, version=challenge.version)
             session.commit()
-            return _challenge_payload(challenge, event)
+            return _challenge_payload(challenge, stage)
 
     @router.get("/announcements")
     def list_announcements(request: Request, authorization: str = Header()):
@@ -233,19 +245,19 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
 
 def _event_admin_payload(session, event) -> dict:
     editor = session.get(User, event.updated_by_user_id) if event.updated_by_user_id else None
-    return {**event_payload(event, datetime.now(UTC)), "updated_at": event.updated_at.isoformat() if event.updated_at else None,
+    stage = stage_rules.default_stage(session, event.id)
+    return {**event_payload(event, datetime.now(UTC), stage), "updated_at": event.updated_at.isoformat() if event.updated_at else None,
             "updated_by": editor.display_name if editor else None}
 
 
-def _challenge_payload(challenge: Challenge | None, event) -> dict:
-    released = event.challenge_release_at is not None and datetime.now(UTC) >= event.challenge_release_at
+def _challenge_payload(challenge: Track | None, stage) -> dict:
+    released = stage_rules.statements_released(stage, datetime.now(UTC))
+    release_at = stage.statements_release_at.isoformat() if stage.statements_release_at else None
     if challenge is None:
-        return {"title": "", "summary": "", "body": "", "resources": [], "version": 0, "updated_at": None,
-                "release_at": event.challenge_release_at.isoformat() if event.challenge_release_at else None, "released": released}
+        return {"title": "", "summary": "", "body": "", "resources": [], "version": 0, "updated_at": None, "release_at": release_at, "released": released}
     return {
         "title": challenge.title, "summary": challenge.summary, "body": challenge.body, "resources": challenge.resources or [],
-        "version": challenge.version, "updated_at": challenge.updated_at.isoformat(),
-        "release_at": event.challenge_release_at.isoformat() if event.challenge_release_at else None, "released": released,
+        "version": challenge.version, "updated_at": challenge.updated_at.isoformat(), "release_at": release_at, "released": released,
     }
 
 

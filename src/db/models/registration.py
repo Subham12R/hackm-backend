@@ -186,9 +186,13 @@ class ActivationToken(Base):
 
 class Submission(Base):
     __tablename__ = "submissions"
+    __table_args__ = (UniqueConstraint("registration_id", "stage_id", name="uq_submissions_registration_stage"),)
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    registration_id: Mapped[UUID] = mapped_column(ForeignKey("registrations.id"), unique=True)
+    registration_id: Mapped[UUID] = mapped_column(ForeignKey("registrations.id"), index=True)
+    # One submission per team per stage; the track is the problem statement the team chose.
+    stage_id: Mapped[UUID] = mapped_column(ForeignKey("stages.id"), index=True)
+    track_id: Mapped[UUID | None] = mapped_column(ForeignKey("tracks.id", ondelete="SET NULL"))
     status: Mapped[str] = mapped_column(String(40), default="DRAFT")
     project_name: Mapped[str] = mapped_column(String(200), default="")
     github_url: Mapped[str] = mapped_column(String(500), default="")
