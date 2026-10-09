@@ -134,13 +134,13 @@ Gallery photos live in S3. Admins' browsers upload straight to the bucket with a
 
 ### Cloudflare R2
 
-R2 has no POST uploads, so when `S3_ENDPOINT_URL` is set the API signs a PUT instead (content type and length are part of the signature, and the API still checks the object before listing it).
+R2 has no POST uploads, so for R2 (or any `S3_ENDPOINT_URL`) the API signs a PUT instead (content type and length are part of the signature, and the API still checks the object before listing it).
 
 1. Create an R2 bucket, for example `hackmatrix-gallery`.
 2. Make it publicly readable: enable the `r2.dev` URL or connect a custom domain under the bucket's Settings → Public access.
 3. Add a CORS policy: allowed origin the admin URL, methods `PUT` and `GET`, allowed headers `Content-Type` and `Cache-Control`.
 4. Create an R2 API token with "Object Read & Write" scoped to that bucket.
-5. Set in the server `.env`: `S3_BUCKET`, `S3_REGION=auto`, `S3_ENDPOINT_URL=https://<account_id>.r2.cloudflarestorage.com`, `S3_PUBLIC_BASE_URL` (the r2.dev URL or custom domain), and the token's keys as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+5. Set in the server `.env`: `R2_BUCKET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` (the token's keys) and `R2_PUBLIC_URL` (the r2.dev URL or custom domain). `R2_BUCKET` takes precedence over the `S3_*` settings.
 
 Without `S3_BUCKET` the API still runs; the public gallery is empty and uploads answer 503.
 

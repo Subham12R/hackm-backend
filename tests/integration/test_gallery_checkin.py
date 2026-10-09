@@ -1,5 +1,7 @@
 from uuid import uuid4
 
+import pytest
+
 from src.auth.policies import RoleCode
 from src.storage.s3 import StoredObject
 from tests.helpers import Harness, staff
@@ -171,3 +173,24 @@ def test_s3_compatible_stores_get_a_presigned_put(monkeypatch):
 
     aws = S3Storage("hackm", "ap-south-1")
     assert aws.presign_upload("gallery/a.png", "image/png", 10)["method"] == "POST"
+
+
+def test_r2_settings_build_an_r2_store(monkeypatch):
+    from src.storage.s3 import storage_from_env
+
+    monkeypatch.delenv("S3_BUCKET", raising=False)
+    monkeypatch.setenv("R2_BUCKET", "hackm")
+    monkeypatch.setenv("R2_ACCOUNT_ID", "abc123")
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("R2_PUBLIC_URL", "https://pub-1.r2.dev/")
+    store = storage_from_env()
+    signed = store.presign_upload("gallery/a.webp", "image/webp", 99)
+    assert signed["method"] == "PUT"
+    assert signed["url"].startswith("https://abc123.r2.cloudflarestorage.com/hackm/gallery/a.webp?")
+    assert "X-Amz-Credential=key%2F" in signed["url"]
+    assert store.public_url("gallery/a.webp") == "https://pub-1.r2.dev/gallery/a.webp"
+
+    monkeypatch.delenv("R2_PUBLIC_URL")
+    with pytest.raises(RuntimeError):
+        storage_from_env()
