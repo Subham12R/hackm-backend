@@ -32,7 +32,15 @@ class Storage(Protocol):
 
 
 class S3Storage:
-    def __init__(self, bucket: str, region: str, public_base_url: str | None = None, endpoint_url: str | None = None) -> None:
+    def __init__(
+        self,
+        bucket: str,
+        region: str,
+        public_base_url: str | None = None,
+        endpoint_url: str | None = None,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
+    ) -> None:
         import boto3
         from botocore.config import Config
 
@@ -42,6 +50,9 @@ class S3Storage:
         self._client = boto3.client(
             "s3",
             region_name=region,
+            # None falls back to the standard AWS chain (AWS_ACCESS_KEY_ID, an instance role, ...).
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=secret_access_key,
             # The regional endpoint avoids the 307 redirect a new bucket gets on the global one, which breaks browser POSTs.
             endpoint_url=endpoint_url or f"https://s3.{region}.amazonaws.com",
             config=Config(
@@ -101,6 +112,13 @@ class S3Storage:
 
 def storage_from_env() -> S3Storage | None:
     """None when no bucket is configured; gallery uploads then answer 503 and the rest of the API runs."""
+    if bucket := os.getenv("R2_BUCKET"):
+        account_id = os.getenv("R2_ACCOUNT_ID")
+        endpoint = os.getenv("R2_ENDPOINT_URL") or (account_id and f"https://{account_id}.r2.cloudflarestorage.com")
+        public_url = os.getenv("R2_PUBLIC_URL")
+        if not endpoint or not public_url:
+            raise RuntimeError("R2_BUCKET needs R2_ACCOUNT_ID (or R2_ENDPOINT_URL) and R2_PUBLIC_URL")
+        return S3Storage(bucket, "auto", public_url, endpoint, os.getenv("R2_ACCESS_KEY_ID"), os.getenv("R2_SECRET_ACCESS_KEY"))
     bucket = os.getenv("S3_BUCKET")
     if not bucket:
         return None
