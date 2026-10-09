@@ -89,6 +89,10 @@ class Registration(Base):
     adjustment_status: Mapped[str] = mapped_column(String(20), default="NONE")
     adjustment_amount_minor: Mapped[int] = mapped_column(Integer, default=0)
     refunded_amount_minor: Mapped[int] = mapped_column(Integer, default=0)
+    # Finals selection: PENDING -> ACCEPTED or DECLINED. Only ACCEPTED teams appear at check-in.
+    finals_status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    finals_decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finals_decided_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
 
 
 class RegistrationMember(Base):
@@ -106,6 +110,17 @@ class RegistrationMember(Base):
     acm_review_status: Mapped[str] = mapped_column(String(20), default="NOT_APPLICABLE")
     acm_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     acm_reviewed_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+
+
+class MemberCheckin(Base):
+    """One row per member who has arrived at the finals; deleting it undoes the check-in."""
+
+    __tablename__ = "member_checkins"
+
+    member_id: Mapped[UUID] = mapped_column(ForeignKey("registration_members.id", ondelete="CASCADE"), primary_key=True)
+    registration_id: Mapped[UUID] = mapped_column(ForeignKey("registrations.id"), index=True)
+    checked_in_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    checked_in_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
 
 
 class PaymentOrder(Base):

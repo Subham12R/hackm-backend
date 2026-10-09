@@ -114,13 +114,14 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
         category: RegistrationCategory | None = None,
         status: Literal["PAYMENT_PENDING", "PAID", "REFUNDED", "ABANDONED", "ALL"] | None = None,
         search: str | None = Query(None, max_length=100),
+        finals: Literal["PENDING", "ACCEPTED", "DECLINED"] | None = None,
         page: int = Query(1, ge=1),
         page_size: int = Query(10, ge=1, le=100),
     ):
         session, _user = admin_user(request, authorization)
         with session:
             timezone = current_event(session).timezone
-            rows, total, daily = _page(session, timezone, registered_on, category, status, search, page, page_size)
+            rows, total, daily = _page(session, timezone, registered_on, category, status, search, page, page_size, finals)
             return {"items": _team_rows(session, rows, timezone), "total": total, "page": page, "page_size": page_size, "daily_counts": daily}
 
     @router.post("/teams/{registration_id}/review")
@@ -313,9 +314,11 @@ def _backfill_categories(session: Session) -> None:
         session.commit()
 
 
-def _page(session, timezone, registered_on, category, status, search, page, page_size):
+def _page(session, timezone, registered_on, category, status, search, page, page_size, finals=None):
     _backfill_categories(session)
     filters = [Registration.event_id == ACTIVE_EVENT_ID]
+    if finals is not None:
+        filters.append(Registration.finals_status == finals)
     if status is None:
         filters.append(Registration.status.in_(LISTED_STATUSES))
     elif status != "ALL":
@@ -408,7 +411,12 @@ def _registration_rows(session, registrations: list[Registration], timezone: str
 def _team_rows(session, registrations: list[Registration], timezone: str) -> list[dict]:
     ids = [registration.id for registration in registrations]
     members = _members_by_registration(session, ids)
-    reviewer_ids = {registration.details_reviewed_by_user_id for registration in registrations if registration.details_reviewed_by_user_id}
+    reviewer_ids = {
+        user_id
+        for registration in registrations
+        for user_id in (registration.details_reviewed_by_user_id, registration.finals_decided_by_user_id)
+        if user_id
+    }
     reviewers = {user.id: user.display_name for user in session.scalars(select(User).where(User.id.in_(reviewer_ids)))} if reviewer_ids else {}
     rows = []
     for registration in registrations:
@@ -442,6 +450,11 @@ def _team_rows(session, registrations: list[Registration], timezone: str) -> lis
                 "status": registration.details_review_status,
                 "reviewed_at": registration.details_reviewed_at.isoformat() if registration.details_reviewed_at else None,
                 "reviewed_by": reviewers.get(registration.details_reviewed_by_user_id),
+            },
+            "finals": {
+                "status": registration.finals_status,
+                "decided_at": registration.finals_decided_at.isoformat() if registration.finals_decided_at else None,
+                "decided_by": reviewers.get(registration.finals_decided_by_user_id),
             },
         })
     return rows
