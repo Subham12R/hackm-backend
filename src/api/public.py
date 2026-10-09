@@ -12,6 +12,7 @@ from src.db.models.contact import ContactMessage
 from src.db.models.judging import ResultRow
 from src.db.models.media import GalleryPhoto
 from src.db.session import create_db_engine
+from src.events import stages as stage_rules
 from src.events.service import ACTIVE_EVENT_ID, current_event, event_payload
 from src.judging.service import released_snapshots
 
@@ -35,8 +36,9 @@ def _session(request: Request) -> Session:
 def public_event(request: Request):
     with _session(request) as session:
         event = current_event(session)
+        now = datetime.now(UTC)
         # Windows and "now" are computed per request; only the stored config could be cached safely.
-        return event_payload(event, datetime.now(UTC))
+        return event_payload(event, now, stage_rules.current_stage(stage_rules.stages(session, event.id, published_only=True), now))
 
 
 @router.get("/leaderboard")

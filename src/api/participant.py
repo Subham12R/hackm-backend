@@ -21,17 +21,18 @@ from src.db.models.identity import User
 from src.db.models.registration import (
     Announcement,
     AnnouncementRead,
-    Challenge,
     PaymentOrder,
     Registration,
     RegistrationMember,
     Submission,
 )
 from src.db.models.judging import ResultRow
+from src.db.models.stage import Stage, Track
+from src.events import stages as stage_rules
 from src.events.service import current_event, event_payload
 from src.judging.service import criteria as judging_criteria
 from src.judging.service import released_snapshots
-from src.events.windows import challenge_released, ensure_window_open, window_state
+from src.events.windows import window_state
 from src.operations import team_code
 from src.payments import service as payments
 from src.payments.providers.razorpay import create_order
@@ -63,6 +64,8 @@ class SubmissionRequest(BaseModel):
     video_url: Link = ""
     documentation_url: Link = ""
     description: Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)] = ""
+    # The problem statement (track) of the stage the team is building for.
+    track_id: UUID | None = None
     # The version the client edited; a mismatch means another tab saved first.
     version: int | None = None
 
@@ -99,7 +102,8 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
             now = datetime.now(UTC)
             event = current_event(session)
             members = payments.registration_members(session, registration.id)
-            submission = session.scalar(select(Submission).where(Submission.registration_id == registration.id))
+            stage = stage_rules.current_stage(stage_rules.team_stages(session, registration), now)
+            submission = _submission_for(session, registration.id, stage.id) if stage else None
             unread = session.scalar(
                 select(func.count(Announcement.id))
                 .outerjoin(AnnouncementRead, (AnnouncementRead.announcement_id == Announcement.id) & (AnnouncementRead.user_id == user.id))
@@ -114,7 +118,7 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 "adjustment": {"status": registration.adjustment_status, "amount_minor": registration.adjustment_amount_minor},
                 "members": [_member_payload(member) for member in members],
                 "submission": _submission_payload(submission),
-                "event": event_payload(event, now),
+                "event": event_payload(event, now, stage),
                 "unread_announcements": int(unread or 0),
                 "team_editable": window_state(event, "registration", now) != "CLOSED",
             }
@@ -161,44 +165,48 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 "adjustment": {"status": registration.adjustment_status, "amount_minor": registration.adjustment_amount_minor},
             }
 
-    @router.put("/submission")
-    def save_submission(payload: SubmissionRequest, request: Request, authorization: str = Header()):
+    @router.get("/stages")
+    def list_stages(request: Request, authorization: str = Header()):
+        """Every event this team takes part in, with its problem statements once revealed and the team's submission."""
+        session, _user, registration = leader_registration(request, authorization)
+        with session:
+            now = datetime.now(UTC)
+            visible = stage_rules.team_stages(session, registration)
+            current = stage_rules.current_stage(visible, now)
+            submissions = {
+                item.stage_id: item for item in session.scalars(select(Submission).where(Submission.registration_id == registration.id))
+            }
+            return {
+                "current_stage_id": str(current.id) if current else None,
+                "stages": [_stage_payload(session, stage, submissions.get(stage.id), now) for stage in visible],
+            }
+
+    @router.put("/stages/{stage_id}/submission")
+    def save_stage_submission(stage_id: UUID, payload: SubmissionRequest, request: Request, authorization: str = Header()):
+        session, _user, registration = leader_registration(request, authorization, lock=True)
+        with session:
+            stage = _team_stage(session, registration, stage_id)
+            return _save_submission(session, request, registration, stage, payload)
+
+    @router.post("/stages/{stage_id}/submission/finalize")
+    def finalize_stage_submission(stage_id: UUID, request: Request, authorization: str = Header()):
         session, user, registration = leader_registration(request, authorization, lock=True)
         with session:
-            event = current_event(session)
-            if window_state(event, "submission", datetime.now(UTC)) == "CLOSED":
-                raise HTTPException(403, "submission is closed")
-            submission = _editable_submission(session, registration.id)
-            if payload.version is not None and submission.version != payload.version:
-                raise HTTPException(409, "submission was changed in another window; reload to continue")
-            for field in ("project_name", "github_url", "pitch_deck_url", "demo_url", "video_url", "documentation_url", "description"):
-                setattr(submission, field, getattr(payload, field))
-            submission.version = (submission.version or 0) + 1
-            submission.updated_at = datetime.now(UTC)
-            session.commit()
-            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
-            return _submission_payload(submission)
+            stage = _team_stage(session, registration, stage_id)
+            return _finalize_submission(session, request, user, registration, stage)
+
+    # The single-submission endpoints act on the team's current event, for clients that predate stages.
+    @router.put("/submission")
+    def save_submission(payload: SubmissionRequest, request: Request, authorization: str = Header()):
+        session, _user, registration = leader_registration(request, authorization, lock=True)
+        with session:
+            return _save_submission(session, request, registration, _current_team_stage(session, registration), payload)
 
     @router.post("/submission/finalize")
     def finalize_submission(request: Request, authorization: str = Header()):
         session, user, registration = leader_registration(request, authorization, lock=True)
         with session:
-            ensure_window_open(current_event(session), "submission", datetime.now(UTC))
-            if registration.adjustment_status == "REQUIRED":
-                raise HTTPException(409, "pay the balance due before final submission")
-            submission = _editable_submission(session, registration.id)
-            if not submission.project_name or not submission.github_url or not submission.pitch_deck_url:
-                raise HTTPException(422, "project name, GitHub URL, and pitch deck URL are required")
-            submission.status = "SUBMITTED"
-            submission.submitted_at = datetime.now(UTC)
-            submission.updated_at = submission.submitted_at
-            submission.version = (submission.version or 0) + 1
-            if submission.anonymous_code is None:
-                submission.anonymous_code = _unique_code(session)
-            audit(session, user, "Submitted project", "registration", registration.id, project=submission.project_name)
-            session.commit()
-            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
-            return _submission_payload(submission)
+            return _finalize_submission(session, request, user, registration, _current_team_stage(session, registration))
 
     @router.post("/payment-adjustment/order")
     def adjustment_order(request: Request, authorization: str = Header()):
@@ -253,16 +261,18 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
 
     @router.get("/challenge")
     def challenge(request: Request, authorization: str = Header()):
-        session, _user, _registration = leader_registration(request, authorization)
+        """The current event's first problem statement, for clients that predate stages."""
+        session, _user, registration = leader_registration(request, authorization)
         with session:
-            event = current_event(session)
-            if not challenge_released(event, datetime.now(UTC)):
-                return {"locked": True, "release_at": event.challenge_release_at.isoformat() if event.challenge_release_at else None}
-            row = session.scalar(select(Challenge).where(Challenge.event_id == event.id))
+            stage = _current_team_stage(session, registration)
+            release_at = stage.statements_release_at.isoformat() if stage.statements_release_at else None
+            if not stage_rules.statements_released(stage, datetime.now(UTC)):
+                return {"locked": True, "release_at": release_at}
+            row = next(iter(stage_rules.tracks(session, stage.id)), None)
             if row is None:
-                return {"locked": True, "release_at": event.challenge_release_at.isoformat()}
+                return {"locked": True, "release_at": release_at}
             return {
-                "locked": False, "release_at": event.challenge_release_at.isoformat(), "title": row.title, "summary": row.summary,
+                "locked": False, "release_at": release_at, "title": row.title, "summary": row.summary,
                 "body": row.body, "resources": row.resources or [], "version": row.version, "updated_at": row.updated_at.isoformat(),
             }
 
@@ -339,10 +349,85 @@ def _unique_code(session: Session) -> str:
     raise HTTPException(503, "could not allocate a submission code")
 
 
-def _editable_submission(session: Session, registration_id) -> Submission:
-    submission = session.scalar(select(Submission).where(Submission.registration_id == registration_id).with_for_update())
+def _team_stage(session: Session, registration: Registration, stage_id: UUID) -> Stage:
+    stage = session.get(Stage, stage_id)
+    # Unpublished events and events the team is not part of look the same as missing ones.
+    if stage is None or stage.event_id != registration.event_id or not stage.published or not stage_rules.is_eligible(stage, registration):
+        raise HTTPException(404, "event not found")
+    return stage
+
+
+def _current_team_stage(session: Session, registration: Registration) -> Stage:
+    stage = stage_rules.current_stage(stage_rules.team_stages(session, registration), datetime.now(UTC))
+    if stage is None:
+        raise HTTPException(404, "no event is open to your team")
+    return stage
+
+
+def _submission_for(session: Session, registration_id, stage_id, lock: bool = False) -> Submission | None:
+    query = select(Submission).where(Submission.registration_id == registration_id, Submission.stage_id == stage_id)
+    return session.scalar(query.with_for_update() if lock else query)
+
+
+def _save_submission(session: Session, request: Request, registration: Registration, stage: Stage, payload: SubmissionRequest) -> dict:
+    now = datetime.now(UTC)
+    if stage_rules.submission_state(stage, now) == "CLOSED":
+        raise HTTPException(403, "submission is closed")
+    if payload.track_id is not None:
+        track = session.get(Track, payload.track_id)
+        if track is None or track.stage_id != stage.id:
+            raise HTTPException(422, "choose one of this event's problem statements")
+        if not stage_rules.statements_released(stage, now):
+            raise HTTPException(422, "problem statements are not revealed yet")
+    submission = _editable_submission(session, registration.id, stage.id)
+    if payload.version is not None and submission.version != payload.version:
+        raise HTTPException(409, "submission was changed in another window; reload to continue")
+    for field in ("project_name", "github_url", "pitch_deck_url", "demo_url", "video_url", "documentation_url", "description"):
+        setattr(submission, field, getattr(payload, field))
+    # Older clients do not send a track; keep the one already chosen.
+    if "track_id" in payload.model_fields_set:
+        submission.track_id = payload.track_id
+    submission.version = (submission.version or 0) + 1
+    submission.updated_at = now
+    session.commit()
+    request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+    return _submission_payload(submission)
+
+
+def _finalize_submission(session: Session, request: Request, user: User, registration: Registration, stage: Stage) -> dict:
+    state = stage_rules.submission_state(stage, datetime.now(UTC))
+    if state == "NOT_OPEN":
+        raise HTTPException(403, "submission is not open yet")
+    if state == "CLOSED":
+        raise HTTPException(403, "submission is closed")
+    if registration.adjustment_status == "REQUIRED":
+        raise HTTPException(409, "pay the balance due before final submission")
+    submission = _editable_submission(session, registration.id, stage.id)
+    if not submission.project_name or not submission.github_url or not submission.pitch_deck_url:
+        raise HTTPException(422, "project name, GitHub URL, and pitch deck URL are required")
+    if submission.track_id is None:
+        options = stage_rules.tracks(session, stage.id)
+        # With a single problem statement there is nothing to choose.
+        if len(options) == 1:
+            submission.track_id = options[0].id
+        elif options:
+            raise HTTPException(422, "choose a problem statement before submitting")
+    submission.status = "SUBMITTED"
+    submission.submitted_at = datetime.now(UTC)
+    submission.updated_at = submission.submitted_at
+    submission.version = (submission.version or 0) + 1
+    if submission.anonymous_code is None:
+        submission.anonymous_code = _unique_code(session)
+    audit(session, user, "Submitted project", "registration", registration.id, project=submission.project_name, event=stage.name)
+    session.commit()
+    request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+    return _submission_payload(submission)
+
+
+def _editable_submission(session: Session, registration_id, stage_id) -> Submission:
+    submission = _submission_for(session, registration_id, stage_id, lock=True)
     if submission is None:
-        submission = Submission(registration_id=registration_id, status="DRAFT", project_name="", github_url="", demo_url="",
+        submission = Submission(registration_id=registration_id, stage_id=stage_id, status="DRAFT", project_name="", github_url="", demo_url="",
                                 video_url="", pitch_deck_url="", documentation_url="", description="", version=0)
         session.add(submission)
         try:
@@ -354,12 +439,27 @@ def _editable_submission(session: Session, registration_id) -> Submission:
     return submission
 
 
+def _stage_payload(session: Session, stage: Stage, submission: Submission | None, now: datetime) -> dict:
+    released = stage_rules.statements_released(stage, now)
+    rows = stage_rules.tracks(session, stage.id)
+    return {
+        "id": str(stage.id), "name": stage.name, "description": stage.description, "eligibility": stage.eligibility,
+        "submission_window": stage_rules.window_payload(stage, now),
+        "statements": {"release_at": stage.statements_release_at.isoformat() if stage.statements_release_at else None,
+                       "released": released, "count": len(rows)},
+        # Problem statements stay server-side until the reveal time.
+        "tracks": [stage_rules.track_payload(track) for track in rows] if released else [],
+        "submission": _submission_payload(submission),
+    }
+
+
 def _submission_payload(submission: Submission | None) -> dict:
     if submission is None:
         return {"status": "NOT_STARTED", "project_name": "", "github_url": "", "pitch_deck_url": "", "demo_url": "", "video_url": "",
-                "documentation_url": "", "description": "", "version": 0, "updated_at": None, "submitted_at": None}
+                "documentation_url": "", "description": "", "track_id": None, "version": 0, "updated_at": None, "submitted_at": None}
     return {
         "status": submission.status,
+        "track_id": str(submission.track_id) if submission.track_id else None,
         "project_name": submission.project_name,
         "github_url": submission.github_url,
         "pitch_deck_url": submission.pitch_deck_url,

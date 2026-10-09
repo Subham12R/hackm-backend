@@ -5,7 +5,9 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from src.db.models.registration import Event
-from src.events.windows import challenge_released, window_state
+from src.db.models.stage import Stage
+from src.events.stages import statements_released, window_payload
+from src.events.windows import window_state
 
 ACTIVE_EVENT_ID = UUID("00000000-0000-4000-8000-000000000001")
 
@@ -21,7 +23,8 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
 
-def event_payload(event: Event, now: datetime) -> dict:
+def event_payload(event: Event, now: datetime, stage: Stage | None) -> dict:
+    """The hackathon schedule; `submission` and `challenge` describe one stage (the current one for teams)."""
     return {
         "name": event.name,
         "code": event.code,
@@ -34,13 +37,10 @@ def event_payload(event: Event, now: datetime) -> dict:
             "closes_at": _iso(event.registration_closes_at),
             "state": window_state(event, "registration", now),
         },
-        "submission": {
-            "opens_at": _iso(event.submission_opens_at),
-            "closes_at": _iso(event.submission_closes_at),
-            "state": window_state(event, "submission", now),
-        },
+        "stage": {"id": str(stage.id), "name": stage.name} if stage else None,
+        "submission": window_payload(stage, now) if stage else {"opens_at": None, "closes_at": None, "state": "NOT_OPEN"},
         "challenge": {
-            "release_at": _iso(event.challenge_release_at),
-            "released": challenge_released(event, now),
+            "release_at": _iso(stage.statements_release_at) if stage else None,
+            "released": statements_released(stage, now) if stage else False,
         },
     }

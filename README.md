@@ -97,15 +97,19 @@ Registration and payments:
 Participant, prefix `/api/v1/participant`, leader access token required:
 
 - `GET /dashboard`
-- `PUT /submission`
-- `POST /submission/finalize`
+- `GET /stages` lists the events the team takes part in, their problem statements once revealed, and the team's submission for each
+- `PUT /stages/{stage_id}/submission` and `POST /stages/{stage_id}/submission/finalize` (send `track_id` to pick a problem statement)
+- `PUT /submission`, `POST /submission/finalize` and `GET /challenge` act on the team's current event, for older clients
 
 Admin, prefix `/api/v1/admin`, admin role required:
 
 - `GET /registrations`
 - `GET /teams`
-- `GET /submissions`
-- `POST /submissions/{registration_id}/assign`
+- `GET /stages`, `POST /stages`, `PATCH /stages/{id}`, `DELETE /stages/{id}` manage events (online round, finals, ...): schedule, who takes part (`ALL_PAID` or `FINALISTS`), published
+- `POST /stages/{id}/tracks`, `PUT /tracks/{id}`, `DELETE /tracks/{id}` manage an event's problem statements
+- `GET /submissions?stage_id=&track_id=` lists one event's submissions (the first event when left out)
+- `POST /submissions/{registration_id}/assign?stage_id=`
+- `POST /submissions/{submission_id}/awards` (`placement`, optional `label` and `track_id`) and `DELETE /awards/{id}` mark winners per event and per track
 - `GET /evaluations`
 - `POST /evaluations`
 - `GET /logs`
@@ -113,6 +117,8 @@ Admin, prefix `/api/v1/admin`, admin role required:
 - `GET /checkins` lists finals teams with members, arrival counts, and a 15-minute arrival timeline
 - `POST /checkins/members/{member_id}` and `POST /checkins/teams/{registration_id}` mark or undo arrivals
 - `GET /gallery`, `POST /gallery/uploads` (presigned S3 POST), `POST /gallery`, `PATCH /gallery/{id}`, `DELETE /gallery/{id}`
+
+Teams register and pay once; each event ("stage" in the code) has its own submission window, problem statements, submissions, judging rounds and winners. Migration `0012_stages` moves the existing schedule, challenge, submissions and rounds into a published "Main round". The event-level submission times and `/admin/challenge` now act on the first event.
 
 Public, prefix `/api/v1/public`: `GET /event`, `GET /leaderboard`, `GET /gallery`, `POST /contact`.
 

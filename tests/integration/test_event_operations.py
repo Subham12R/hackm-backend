@@ -5,24 +5,38 @@ from sqlalchemy import select, update
 
 from src.auth.policies import RoleCode
 from src.db.models.registration import Event, Registration, RegistrationMember
+from src.db.models.stage import Stage
 from src.events.service import ACTIVE_EVENT_ID
+from src.events.stages import default_stage
 from tests.helpers import Harness, db, staff
 
-WINDOWS = ("registration_opens_at", "registration_closes_at", "submission_opens_at", "submission_closes_at", "challenge_release_at")
+WINDOWS = ("registration_opens_at", "registration_closes_at")
+# These now live on the first stage; the tests keep the event-era names.
+STAGE_WINDOWS = {"submission_opens_at": "submission_opens_at", "submission_closes_at": "submission_closes_at", "challenge_release_at": "statements_release_at"}
+
+
+def _reset_windows() -> None:
+    with db() as session:
+        session.execute(update(Event).where(Event.id == ACTIVE_EVENT_ID).values(**{name: None for name in WINDOWS}))
+        session.execute(update(Stage).where(Stage.id == default_stage(session, ACTIVE_EVENT_ID).id).values(**{name: None for name in STAGE_WINDOWS.values()}))
+        session.commit()
 
 
 @contextmanager
 def event_windows(**values):
-    """The event row is shared by every test, so always restore it."""
+    """The event and first stage rows are shared by every test, so always restore them."""
     with db() as session:
-        session.execute(update(Event).where(Event.id == ACTIVE_EVENT_ID).values(**values))
+        event_values = {name: value for name, value in values.items() if name not in STAGE_WINDOWS}
+        stage_values = {STAGE_WINDOWS[name]: value for name, value in values.items() if name in STAGE_WINDOWS}
+        if event_values:
+            session.execute(update(Event).where(Event.id == ACTIVE_EVENT_ID).values(**event_values))
+        if stage_values:
+            session.execute(update(Stage).where(Stage.id == default_stage(session, ACTIVE_EVENT_ID).id).values(**stage_values))
         session.commit()
     try:
         yield
     finally:
-        with db() as session:
-            session.execute(update(Event).where(Event.id == ACTIVE_EVENT_ID).values(**{name: None for name in WINDOWS}))
-            session.commit()
+        _reset_windows()
 
 
 def _submission(**overrides) -> dict:
@@ -59,9 +73,7 @@ def test_admin_event_control_validates_and_audits() -> None:
         assert good.status_code == 200 and good.json()["submission"]["state"] == "NOT_OPEN"
         assert harness.client.get("/api/v1/public/event").json()["submission"]["state"] == "NOT_OPEN"
     finally:
-        with db() as session:
-            session.execute(update(Event).where(Event.id == ACTIVE_EVENT_ID).values(**{name: None for name in WINDOWS}))
-            session.commit()
+        _reset_windows()
 
 
 def test_challenge_stays_hidden_until_release_time() -> None:
