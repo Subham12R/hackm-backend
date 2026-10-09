@@ -76,7 +76,7 @@ def admin_gallery_router(public_key: Ed25519PublicKey) -> APIRouter:
         if extension is None:
             raise HTTPException(422, "photos must be JPEG, PNG, WebP or AVIF")
         key = f"{GALLERY_PREFIX}{datetime.now(UTC):%Y/%m}/{uuid4().hex}.{extension}"
-        return {"object_key": key, **storage(request).presign_upload(key, payload.content_type)}
+        return {"object_key": key, **storage(request).presign_upload(key, payload.content_type, payload.size_bytes)}
 
     @router.post("", status_code=201)
     def create_photo(payload: PhotoCreate, request: Request, authorization: str = Header()):

@@ -10,8 +10,8 @@ class FakeStorage:
         self.objects: dict[str, StoredObject] = {}
         self.deleted: list[str] = []
 
-    def presign_upload(self, key: str, content_type: str) -> dict:
-        return {"url": "https://bucket.example/upload", "fields": {"key": key, "Content-Type": content_type}}
+    def presign_upload(self, key: str, content_type: str, size_bytes: int) -> dict:
+        return {"method": "POST", "url": "https://bucket.example/upload", "fields": {"key": key, "Content-Type": content_type}}
 
     def head(self, key: str) -> StoredObject | None:
         return self.objects.get(key)
@@ -150,3 +150,24 @@ def test_only_finals_teams_check_in_with_analytics() -> None:
     logs = harness.client.get("/api/v1/admin/logs", headers=reviewer).json()
     actions = {log["action"] for log in logs.get("logs", logs.get("items", []))}
     assert {"Finals selection updated", "Participant checked in", "Team check-in undone"} <= actions
+
+
+def test_s3_compatible_stores_get_a_presigned_put(monkeypatch):
+    # Cloudflare R2 has no POST uploads, so any custom endpoint signs a PUT with type and length fixed.
+    from urllib.parse import parse_qs, urlparse
+
+    from src.storage.s3 import S3Storage
+
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
+    r2 = S3Storage("hackm", "auto", "https://photos.example", "https://account.r2.cloudflarestorage.com")
+    signed = r2.presign_upload("gallery/2026/10/a.jpg", "image/jpeg", 1234)
+    assert signed["method"] == "PUT"
+    assert signed["headers"]["Content-Type"] == "image/jpeg"
+    assert signed["url"].startswith("https://account.r2.cloudflarestorage.com/hackm/gallery/2026/10/a.jpg?")
+    signed_headers = parse_qs(urlparse(signed["url"]).query)["X-Amz-SignedHeaders"][0].split(";")
+    assert {"content-length", "content-type", "cache-control"} <= set(signed_headers)
+    assert r2.public_url("gallery/2026/10/a.jpg") == "https://photos.example/gallery/2026/10/a.jpg"
+
+    aws = S3Storage("hackm", "ap-south-1")
+    assert aws.presign_upload("gallery/a.png", "image/png", 10)["method"] == "POST"

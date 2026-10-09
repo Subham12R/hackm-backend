@@ -1,6 +1,7 @@
 """S3 storage for gallery photos.
 
-Browsers upload straight to the bucket with a presigned POST, so photo bytes never pass
+Browsers upload straight to the bucket with a presigned POST (AWS) or PUT (S3-compatible
+stores such as Cloudflare R2, which has no POST uploads), so photo bytes never pass
 through the API. The API only signs uploads, confirms the object landed, and deletes it.
 Credentials come from the standard AWS chain (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY,
 an instance role, ...); nothing secret is stored here.
@@ -13,6 +14,7 @@ from typing import Protocol
 GALLERY_PREFIX = "gallery/"
 MAX_PHOTO_BYTES = 15 * 1024 * 1024
 UPLOAD_TTL_SECONDS = 10 * 60
+CACHE_CONTROL = "public, max-age=31536000, immutable"
 PHOTO_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/avif": "avif"}
 
 
@@ -23,7 +25,7 @@ class StoredObject:
 
 
 class Storage(Protocol):
-    def presign_upload(self, key: str, content_type: str) -> dict: ...
+    def presign_upload(self, key: str, content_type: str, size_bytes: int) -> dict: ...
     def head(self, key: str) -> StoredObject | None: ...
     def delete(self, key: str) -> None: ...
     def public_url(self, key: str) -> str: ...
@@ -35,6 +37,8 @@ class S3Storage:
         from botocore.config import Config
 
         self.bucket = bucket
+        # R2 and most S3-compatible stores do not implement POST uploads, so they get a presigned PUT.
+        self._post_uploads = endpoint_url is None
         self._client = boto3.client(
             "s3",
             region_name=region,
@@ -53,20 +57,29 @@ class S3Storage:
         else:
             self._public_base = f"https://{bucket}.s3.{region}.amazonaws.com"
 
-    def presign_upload(self, key: str, content_type: str) -> dict:
-        # A presigned POST (unlike PUT) lets S3 itself enforce the size limit and content type.
+    def presign_upload(self, key: str, content_type: str, size_bytes: int) -> dict:
+        if not self._post_uploads:
+            # Content type and length are signed, so the store rejects a different file; the API
+            # still checks the object with HEAD before listing it.
+            url = self._client.generate_presigned_url(
+                "put_object",
+                Params={"Bucket": self.bucket, "Key": key, "ContentType": content_type, "CacheControl": CACHE_CONTROL, "ContentLength": size_bytes},
+                ExpiresIn=UPLOAD_TTL_SECONDS,
+            )
+            return {"method": "PUT", "url": url, "headers": {"Content-Type": content_type, "Cache-Control": CACHE_CONTROL}}
+        # A presigned POST lets S3 itself enforce the size limit and content type.
         post = self._client.generate_presigned_post(
             Bucket=self.bucket,
             Key=key,
-            Fields={"Content-Type": content_type, "Cache-Control": "public, max-age=31536000, immutable"},
+            Fields={"Content-Type": content_type, "Cache-Control": CACHE_CONTROL},
             Conditions=[
                 {"Content-Type": content_type},
-                {"Cache-Control": "public, max-age=31536000, immutable"},
+                {"Cache-Control": CACHE_CONTROL},
                 ["content-length-range", 1, MAX_PHOTO_BYTES],
             ],
             ExpiresIn=UPLOAD_TTL_SECONDS,
         )
-        return {"url": post["url"], "fields": post["fields"]}
+        return {"method": "POST", "url": post["url"], "fields": post["fields"]}
 
     def head(self, key: str) -> StoredObject | None:
         from botocore.exceptions import ClientError
