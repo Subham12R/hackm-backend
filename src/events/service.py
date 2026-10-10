@@ -36,6 +36,7 @@ def event_payload(event: Event, now: datetime, stage: Stage | None) -> dict:
             "opens_at": _iso(event.registration_opens_at),
             "closes_at": _iso(event.registration_closes_at),
             "state": window_state(event, "registration", now),
+            "enabled": event.registration_enabled,
         },
         "stage": {"id": str(stage.id), "name": stage.name} if stage else None,
         "submission": window_payload(stage, now) if stage else {"opens_at": None, "closes_at": None, "state": "NOT_OPEN"},

@@ -20,6 +20,8 @@ class Event(Base):
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     registration_opens_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     registration_closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Manual switch on top of the window: off closes registration whatever the times say.
+    registration_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     submission_opens_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     submission_closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     challenge_release_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

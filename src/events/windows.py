@@ -10,6 +10,8 @@ WINDOWS = {
 
 
 def window_state(event: Event, kind: str, now: datetime) -> str:
+    if kind == "registration" and not event.registration_enabled:
+        return "CLOSED"
     opens_attr, closes_attr = WINDOWS[kind]
     opens_at, closes_at = getattr(event, opens_attr), getattr(event, closes_attr)
     if opens_at is not None and now < opens_at:

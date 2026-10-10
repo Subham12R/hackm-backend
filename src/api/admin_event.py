@@ -45,6 +45,7 @@ class EventUpdate(BaseModel):
     ends_at: datetime | None = None
     registration_opens_at: datetime | None = None
     registration_closes_at: datetime | None = None
+    registration_enabled: bool | None = None
     submission_opens_at: datetime | None = None
     submission_closes_at: datetime | None = None
     challenge_release_at: datetime | None = None
@@ -101,7 +102,7 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
             changes = {}
             for field in payload.model_fields_set:
                 value = getattr(payload, field)
-                if field in ("name", "timezone") and value is None:
+                if field in ("name", "timezone", "registration_enabled") and value is None:
                     continue
                 target, attribute = (stage, STAGE_FIELDS[field]) if field in STAGE_FIELDS else (event, field)
                 if getattr(target, attribute) != value:
