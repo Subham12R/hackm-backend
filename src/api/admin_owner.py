@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from src.api.deps import authenticated_user
 from src.audit import audit
-from src.auth.owner import is_owner
+from src.auth.owner import delivery_address, is_owner
 from src.auth.policies import RoleCode
 from src.auth.rate_limits import is_limited
 from src.auth.security import verify_password
@@ -84,7 +84,7 @@ def admin_owner_router(public_key: Ed25519PublicKey) -> APIRouter:
             audit(session, user, "Requested flush code", "user", user.email_normalized)
             session.commit()
             background.add_task(dispatch_pending, request.app.state.database_url, request.app.state.email_sender, 5)
-            return {"sent_to": user.email_normalized, "expires_at": challenge.expires_at.isoformat()}
+            return {"sent_to": delivery_address(user.email_normalized), "expires_at": challenge.expires_at.isoformat()}
 
     @router.post("/flush")
     def flush(payload: FlushRequest, request: Request, background: BackgroundTasks, authorization: str = Header()):

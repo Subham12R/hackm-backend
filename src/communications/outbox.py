@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from src.auth.owner import delivery_address
 from src.db.models.registration import EmailOutbox
 from src.db.session import create_db_engine
 
@@ -19,7 +20,9 @@ MAX_ATTEMPTS = 6
 
 def queue_email(session: Session, recipient: str, subject: str, html: str, sender: str = "noreply") -> EmailOutbox:
     """`sender` is one of src.communications.senders.SENDERS: noreply (default), support or announcements."""
-    message = EmailOutbox(recipient=recipient, subject=subject, html=html, sender=sender, status="PENDING", attempts=0, next_attempt_at=datetime.now(UTC))
+    # Mail for the owner account goes to the owner's real inbox (see src/auth/owner.py).
+    message = EmailOutbox(recipient=delivery_address(recipient), subject=subject, html=html, sender=sender, status="PENDING", attempts=0,
+                          next_attempt_at=datetime.now(UTC))
     session.add(message)
     return message
 

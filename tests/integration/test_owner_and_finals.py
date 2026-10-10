@@ -17,7 +17,12 @@ def owner(monkeypatch) -> str:
     """Each test gets its own owner address, so the shared database never has two."""
     email = staff(RoleCode.SUPER_ADMIN)
     monkeypatch.setenv("OWNER_EMAIL", email)
+    monkeypatch.setenv("OWNER_INBOX", INBOX)
     return email
+
+
+# The owner address has no mailbox; its mail is delivered here.
+INBOX = "owner-inbox@example.com"
 
 
 def _code(harness: Harness, email: str) -> str:
@@ -57,8 +62,10 @@ def test_flush_needs_code_password_and_phrase_then_erases_activity(owner) -> Non
 
     attempt = {"password": "password", "code": "000000", "confirmation": "FLUSH HACKMATRIX"}
     assert harness.client.post("/api/v1/admin/owner/flush", headers=root, json=attempt).status_code == 403  # no code requested yet
-    assert harness.client.post("/api/v1/admin/owner/flush/code", headers=root).status_code == 201
-    code = _code(harness, owner)
+    sent = harness.client.post("/api/v1/admin/owner/flush/code", headers=root)
+    assert sent.status_code == 201 and sent.json()["sent_to"] == INBOX
+    code = _code(harness, INBOX)
+    assert not any(to == owner for to, _subject, _html in harness.sink.messages)
     assert harness.client.post("/api/v1/admin/owner/flush", headers=root, json={**attempt, "code": code, "confirmation": "flush hackmatrix"}).status_code == 422
     assert harness.client.post("/api/v1/admin/owner/flush", headers=root, json={**attempt, "code": code, "password": "wrong"}).status_code == 403
     wrong = f"{(int(code) + 1) % 1_000_000:06d}"
@@ -77,7 +84,7 @@ def test_flush_needs_code_password_and_phrase_then_erases_activity(owner) -> Non
         assert session.scalar(select(User.id).where(User.email_normalized == leader_email)) is None
         assert session.scalar(select(User.id).where(User.email_normalized == judge_email)) is not None
     assert harness.client.get("/api/v1/participant/dashboard", headers=leader).status_code in (401, 404)
-    assert any(to == owner and "flushed" in subject for to, subject, _ in harness.sink.messages)
+    assert any(to == INBOX and "flushed" in subject for to, subject, _ in harness.sink.messages)
     logs = harness.client.get("/api/v1/admin/logs", headers=root).json()
     assert "Flushed all event data" in {log["action"] for log in logs.get("logs", logs.get("items", []))}
 

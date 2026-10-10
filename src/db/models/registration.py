@@ -106,6 +106,8 @@ class Registration(Base):
     rsvp_status: Mapped[str] = mapped_column(String(20), default="PENDING")
     rsvp_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rsvp_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
+    # Razorpay's cut (fee + GST) passed on to this team, fixed when it registered; 0 for older teams.
+    processing_fee_ppm: Mapped[int] = mapped_column(Integer, default=0)
     # Invited teams whose entry fee the organisers waived; they never owe a balance.
     fee_waived: Mapped[bool] = mapped_column(Boolean, default=False)
 

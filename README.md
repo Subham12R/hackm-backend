@@ -44,7 +44,9 @@ Required environment values live in `.env` and are never committed:
 - `JWT_PRIVATE_KEY_PEM` and `JWT_PUBLIC_KEY_PEM`
 - `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET`
 - `RESEND_API_KEY` for live email (senders below)
-- `OWNER_EMAIL` (optional, default `admin@hackmatrix.codes`): the protected owner account
+- `RAZORPAY_FEE_PERCENT` (default `2`) and `RAZORPAY_FEE_GST_PERCENT` (default `18`): Razorpay's cut, added on top of the tier price so each tier nets ₹400 / ₹300 / ₹200 (charged ₹410 / ₹308 / ₹205). Set the percent to `0` to stop passing it on.
+- `OWNER_EMAIL` (optional, default `admin@hackmatrix.codes`): the protected owner account (the login)
+- `OWNER_INBOX` (optional, default `rikk4335@gmail.com`): where mail for the owner account is delivered (flush codes, security alerts, password resets); all other mail is unaffected
 - `PARTICIPANT_APP_URL` for activation and reset links
 
 Apply migrations:
