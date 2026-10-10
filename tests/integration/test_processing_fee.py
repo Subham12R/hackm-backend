@@ -43,6 +43,7 @@ def test_new_teams_pay_the_fee_and_older_teams_keep_their_price(monkeypatch) -> 
     assert created.status_code == 202
     checkout = created.json()
     assert (checkout["amount"], checkout["base_amount"], checkout["fee_amount"], checkout["tier"]) == (20500, 20000, 500, "adamas-acm")
+    assert checkout["fee_percent"] == 2.36
     payment = harness.gateway.pay(checkout["order_id"], checkout["amount"])
     assert harness.confirm(payment).status_code == 200
     leader = harness.activate_leader(payload["members"][0]["email"])

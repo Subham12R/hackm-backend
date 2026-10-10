@@ -94,7 +94,9 @@ def _checkout(order: PaymentOrder, registration: Registration, request: Request)
     return {"order_id": order.provider_order_id, "amount": order.amount_minor, "currency": order.currency,
             "key_id": request.app.state.razorpay_key_id, "team_name": registration.team_name,
             # Breakdown for the pay page: the entry fee and the payment processing charge on top.
-            "base_amount": base, "fee_amount": order.amount_minor - base, "tier": registration.pricing_tier}
+            "base_amount": base, "fee_amount": order.amount_minor - base, "tier": registration.pricing_tier,
+            # The gateway rate (fee + GST) fixed when this team registered, e.g. 2.36.
+            "fee_percent": round((registration.processing_fee_ppm or 0) / 10_000, 2)}
 
 
 def _dispatch_email(request: Request, background: BackgroundTasks) -> None:
