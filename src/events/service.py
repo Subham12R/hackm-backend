@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from src.db.models.registration import Event
 from src.db.models.stage import Stage
 from src.events.stages import statements_released, window_payload
-from src.events.windows import window_state
+from src.events.windows import registration_mode, team_edits_close_at, window_state
 
 ACTIVE_EVENT_ID = UUID("00000000-0000-4000-8000-000000000001")
 
@@ -36,7 +36,9 @@ def event_payload(event: Event, now: datetime, stage: Stage | None) -> dict:
             "opens_at": _iso(event.registration_opens_at),
             "closes_at": _iso(event.registration_closes_at),
             "state": window_state(event, "registration", now),
-            "enabled": event.registration_enabled,
+            "mode": registration_mode(event),
+            "team_edits_close_at": _iso(team_edits_close_at(event)),
+            "enabled": registration_mode(event) != "CLOSED",
         },
         "stage": {"id": str(stage.id), "name": stage.name} if stage else None,
         "submission": window_payload(stage, now) if stage else {"opens_at": None, "closes_at": None, "state": "NOT_OPEN"},

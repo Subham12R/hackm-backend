@@ -34,7 +34,7 @@ from src.events import finals as finals_rules
 from src.events.service import current_event, event_payload
 from src.judging.service import criteria as judging_criteria
 from src.judging.service import released_snapshots
-from src.events.windows import window_state
+from src.events.windows import team_edits_close_at, team_edits_open
 from src.operations import team_code
 from src.payments import service as payments
 from src.payments.providers.razorpay import create_order
@@ -134,7 +134,8 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 "finals": _finals(session, registration, members, event),
                 "event": event_payload(event, now, stage),
                 "unread_announcements": int(unread or 0),
-                "team_editable": window_state(event, "registration", now) != "CLOSED",
+                "team_editable": team_edits_open(event, now),
+                "team_edits_close_at": _iso_or_none(team_edits_close_at(event)),
             }
 
     @router.patch("/team/members/{member_id}")
@@ -142,8 +143,8 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
         session, user, registration = leader_registration(request, authorization, lock=True)
         with session:
             event = current_event(session)
-            if window_state(event, "registration", datetime.now(UTC)) == "CLOSED":
-                raise HTTPException(403, "team details are locked after registration closes")
+            if not team_edits_open(event, datetime.now(UTC)):
+                raise HTTPException(403, "team details are locked now; contact support for corrections")
             member = session.get(RegistrationMember, member_id)
             if member is None or member.registration_id != registration.id:
                 raise HTTPException(404, "member not found")
@@ -350,6 +351,10 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
     return router
 
 
+def _iso_or_none(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
 def _verification(registration: Registration, members: list[RegistrationMember]) -> dict:
     acm = [member for member in members if member.is_acm_member]
     if registration.adjustment_status == "REQUIRED":
@@ -411,7 +416,7 @@ def _unique_code(session: Session) -> str:
 def _team_stage(session: Session, registration: Registration, stage_id: UUID) -> Stage:
     stage = session.get(Stage, stage_id)
     # Unpublished events and events the team is not part of look the same as missing ones.
-    if stage is None or stage.event_id != registration.event_id or not stage.published or not stage_rules.is_eligible(stage, registration):
+    if stage is None or stage.event_id != registration.event_id or not stage.published or not stage_rules.is_eligible(stage, registration, released_only=True):
         raise HTTPException(404, "event not found")
     return stage
 

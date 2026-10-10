@@ -79,8 +79,8 @@ def create_app(
         else None
     )
     app.state.email_sender = email_sender or (
-        ResendEmailSender(os.environ["RESEND_API_KEY"], os.environ["EMAIL_FROM"])
-        if os.getenv("RESEND_API_KEY") and os.getenv("EMAIL_FROM")
+        ResendEmailSender(os.environ["RESEND_API_KEY"])
+        if os.getenv("RESEND_API_KEY")
         else LocalEmailSink()
     )
     app.include_router(registration_router)

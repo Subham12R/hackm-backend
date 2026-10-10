@@ -13,6 +13,7 @@ from src.audit import audit
 from src.auth.policies import ADMIN_READ_ROLES, EVENT_CONTROL_ROLES
 from src.communications.markdown_email import PLACEHOLDERS, SAMPLE, campaign_email
 from src.communications.outbox import dispatch_pending, queue_email
+from src.communications.senders import Sender, mailbox, senders_payload
 from src.db.models.identity import User
 from src.db.models.media import EmailCampaign
 from src.db.models.registration import Registration, RegistrationMember
@@ -32,6 +33,7 @@ class CampaignRequest(BaseModel):
     banner_url: Url = ""
     cta_label: Annotated[str, StringConstraints(strip_whitespace=True, max_length=80)] = ""
     cta_url: Url = ""
+    sender: Sender = "announcements"
 
     @model_validator(mode="after")
     def button_needs_both(self):
@@ -70,6 +72,7 @@ def admin_emails_router(public_key: Ed25519PublicKey) -> APIRouter:
                 "audiences": {audience: len(recipients(session, audience)) for audience in AUDIENCES},
                 "uploads": request.app.state.storage is not None,
                 "placeholders": list(PLACEHOLDERS),
+                "senders": senders_payload(),
             }
 
     @router.post("/preview")
@@ -118,7 +121,7 @@ def admin_emails_router(public_key: Ed25519PublicKey) -> APIRouter:
             campaign = load(session, campaign_id)
             first = actor.display_name.split(" ")[0] if actor.display_name else ""
             values = {**SAMPLE, "name": actor.display_name, "first_name": first, "email": actor.email_normalized}
-            queue_email(session, actor.email_normalized, f"[Test] {campaign.subject}", _render(_request_of(campaign), values))
+            queue_email(session, actor.email_normalized, f"[Test] {campaign.subject}", _render(_request_of(campaign), values), sender=campaign.sender)
             audit(session, actor, "Sent test email", "email_campaign", campaign.id, to=actor.email_normalized)
             session.commit()
             dispatch(request, background, 1)
@@ -136,7 +139,7 @@ def admin_emails_router(public_key: Ed25519PublicKey) -> APIRouter:
                 raise HTTPException(409, "nobody is in this audience yet")
             content = _request_of(campaign)
             for person in people:
-                queue_email(session, person["email"], campaign.subject, _render(content, person))
+                queue_email(session, person["email"], campaign.subject, _render(content, person), sender=campaign.sender)
             campaign.status = "SENT"
             campaign.sent_at = datetime.now(UTC)
             campaign.sent_by_user_id = actor.id
@@ -193,7 +196,7 @@ def _render(content: CampaignRequest, values: dict[str, str]) -> str:
 def _request_of(campaign: EmailCampaign) -> CampaignRequest:
     return CampaignRequest(
         subject=campaign.subject, body_markdown=campaign.body_markdown, audience=campaign.audience, show_banner=campaign.show_banner,
-        banner_url=campaign.banner_url, cta_label=campaign.cta_label, cta_url=campaign.cta_url,
+        banner_url=campaign.banner_url, cta_label=campaign.cta_label, cta_url=campaign.cta_url, sender=campaign.sender,
     )
 
 
@@ -206,7 +209,7 @@ def _payload(campaign: EmailCampaign, names: dict) -> dict:
     return {
         "id": str(campaign.id), "subject": campaign.subject, "body_markdown": campaign.body_markdown, "audience": campaign.audience,
         "show_banner": campaign.show_banner, "banner_url": campaign.banner_url, "cta_label": campaign.cta_label, "cta_url": campaign.cta_url,
-        "status": campaign.status, "recipient_count": campaign.recipient_count,
+        "sender": campaign.sender, "from": mailbox(campaign.sender), "status": campaign.status, "recipient_count": campaign.recipient_count,
         "sent_at": campaign.sent_at.isoformat() if campaign.sent_at else None, "sent_by": names.get(campaign.sent_by_user_id),
         "created_at": campaign.created_at.isoformat(), "created_by": names.get(campaign.created_by_user_id),
     }

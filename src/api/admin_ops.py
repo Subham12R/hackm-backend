@@ -111,7 +111,7 @@ def admin_ops_router(public_key: Ed25519PublicKey) -> APIRouter:
                 queue_email(session, message.email, f"Re: {message.subject}", action_email(
                     title=f"Re: {message.subject}", intro=payload.body, rows=[], steps=[], action="Visit HackMatrix",
                     url="https://hackmatrix.codes", note=f"In reply to your message from {message.created_at:%d %b %Y}.", eyebrow="From the organisers",
-                ))
+                ), sender="support")
                 if message.status == "NEW":
                     message.status = "OPEN"
             audit(session, actor, "Replied to contact" if payload.kind == "REPLY" else "Noted contact", "contact", message.id)

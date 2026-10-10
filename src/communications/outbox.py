@@ -17,8 +17,9 @@ logger = logging.getLogger(__name__)
 MAX_ATTEMPTS = 6
 
 
-def queue_email(session: Session, recipient: str, subject: str, html: str) -> EmailOutbox:
-    message = EmailOutbox(recipient=recipient, subject=subject, html=html, status="PENDING", attempts=0, next_attempt_at=datetime.now(UTC))
+def queue_email(session: Session, recipient: str, subject: str, html: str, sender: str = "noreply") -> EmailOutbox:
+    """`sender` is one of src.communications.senders.SENDERS: noreply (default), support or announcements."""
+    message = EmailOutbox(recipient=recipient, subject=subject, html=html, sender=sender, status="PENDING", attempts=0, next_attempt_at=datetime.now(UTC))
     session.add(message)
     return message
 
@@ -42,7 +43,7 @@ def dispatch_pending(database_url: str, sender, limit: int = 25) -> int:
                 break
             message.attempts += 1
             try:
-                result = sender.send(message.recipient, message.subject, message.html)
+                result = sender.send(message.recipient, message.subject, message.html, sender=message.sender)
             except Exception as error:
                 message.last_error = str(error)[:500]
                 if message.attempts >= MAX_ATTEMPTS:

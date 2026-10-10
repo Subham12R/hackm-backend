@@ -20,7 +20,9 @@ class Event(Base):
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     registration_opens_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     registration_closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Manual switch on top of the window: off closes registration whatever the times say.
+    # OPEN (ignore dates), CLOSED (ignore dates) or SCHEDULED (follow the opens/closes dates; unset means no limit).
+    registration_mode: Mapped[str] = mapped_column(String(20), default="SCHEDULED", server_default="SCHEDULED")
+    # Older switch, kept in step with the mode (False exactly when the mode is CLOSED) for older clients.
     registration_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     submission_opens_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     submission_closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -275,6 +277,8 @@ class EmailOutbox(Base):
     recipient: Mapped[str] = mapped_column(String(320))
     subject: Mapped[str] = mapped_column(String(300))
     html: Mapped[str] = mapped_column(Text)
+    # noreply, support or announcements (src/communications/senders.py).
+    sender: Mapped[str] = mapped_column(String(20), default="noreply")
     # PENDING -> SENT, or FAILED after the retry budget.
     status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)

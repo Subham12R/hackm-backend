@@ -43,7 +43,8 @@ Required environment values live in `.env` and are never committed:
 - `NEON_DATABASE_URL` or `DATABASE_URL`
 - `JWT_PRIVATE_KEY_PEM` and `JWT_PUBLIC_KEY_PEM`
 - `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET`
-- `RESEND_API_KEY` and `EMAIL_FROM` for live email
+- `RESEND_API_KEY` for live email (senders below)
+- `OWNER_EMAIL` (optional, default `admin@hackmatrix.codes`): the protected owner account
 - `PARTICIPANT_APP_URL` for activation and reset links
 
 Apply migrations:
@@ -121,6 +122,29 @@ Admin, prefix `/api/v1/admin`, admin role required:
 Teams register and pay once; each event ("stage" in the code) has its own submission window, problem statements, submissions, judging rounds and winners. Migration `0012_stages` moves the existing schedule, challenge, submissions and rounds into a published "Main round". The event-level submission times and `/admin/challenge` now act on the first event.
 
 Public, prefix `/api/v1/public`: `GET /event`, `GET /leaderboard`, `GET /gallery`, `POST /contact`.
+
+## Email senders
+
+Every email goes out from one of three mailboxes on `hackmatrix.codes`:
+
+| Sender | Used for | Reply-To |
+|---|---|---|
+| `noreply@` | Activation, payments, password resets, invites, finals decisions, owner security codes | `support@` |
+| `support@` | Replies to contact-form messages | itself |
+| `announcements@` | Published announcements, and staff emails by default (the Email page can pick any sender) | `support@` |
+
+Only `RESEND_API_KEY` is required: verifying the domain in Resend covers all three addresses. Optional overrides take a full
+`Name <address>` value: `EMAIL_FROM_NOREPLY` (`EMAIL_FROM` still works as its old name), `EMAIL_FROM_SUPPORT`,
+`EMAIL_FROM_ANNOUNCEMENTS`, or `EMAIL_DOMAIN` to move all three to another domain.
+
+DNS (Cloudflare) for `hackmatrix.codes`, all records DNS-only:
+
+1. Resend → Domains → add `hackmatrix.codes` and create the records it lists (DKIM `resend._domainkey` TXT, and the `send`
+   subdomain's SPF TXT and MX). Wait for "Verified".
+2. `_dmarc` TXT: `v=DMARC1; p=none; rua=mailto:support@hackmatrix.codes` (tighten to `p=quarantine` once reports look clean).
+3. Email Routing → enable it, then forward `support@` and `announcements@` to the inbox the team reads. It adds the root MX
+   and SPF records itself; they do not clash with Resend, which sends from the `send` subdomain. Leave `noreply@` unrouted
+   (or route it to a drop rule); its Reply-To already points people at `support@`.
 
 ## Photo gallery storage
 

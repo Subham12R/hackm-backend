@@ -56,10 +56,15 @@ def statements_released(stage: Stage, now: datetime) -> bool:
     return stage.statements_release_at is not None and now >= stage.statements_release_at
 
 
-def is_eligible(stage: Stage, registration: Registration) -> bool:
+def is_eligible(stage: Stage, registration: Registration, released_only: bool = False) -> bool:
+    """`released_only` is for what teams see: a finalists-only event appears once the acceptance has been
+    emailed, never the moment an organiser clicks Accept."""
     if registration.status != "PAID":
         return False
-    return stage.eligibility == "ALL_PAID" or registration.finals_status == "ACCEPTED"
+    if stage.eligibility == "ALL_PAID":
+        return True
+    accepted = registration.finals_status == "ACCEPTED"
+    return accepted and (not released_only or registration.finals_notified_status == "ACCEPTED")
 
 
 def current_stage(candidates: list[Stage], now: datetime) -> Stage | None:
@@ -72,7 +77,7 @@ def current_stage(candidates: list[Stage], now: datetime) -> Stage | None:
 
 def team_stages(session: Session, registration: Registration) -> list[Stage]:
     """Published stages this team takes part in, in order."""
-    return [stage for stage in stages(session, registration.event_id, published_only=True) if is_eligible(stage, registration)]
+    return [stage for stage in stages(session, registration.event_id, published_only=True) if is_eligible(stage, registration, released_only=True)]
 
 
 def placement_label(placement: int) -> str:

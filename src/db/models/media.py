@@ -42,6 +42,8 @@ class EmailCampaign(Base):
     banner_url: Mapped[str] = mapped_column(String(1000), default="")
     cta_label: Mapped[str] = mapped_column(String(80), default="")
     cta_url: Mapped[str] = mapped_column(String(1000), default="")
+    # Which mailbox it is sent from: announcements (default), support or noreply.
+    sender: Mapped[str] = mapped_column(String(20), default="announcements")
     status: Mapped[str] = mapped_column(String(20), default="DRAFT")
     recipient_count: Mapped[int] = mapped_column(Integer, default=0)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
