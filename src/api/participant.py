@@ -39,6 +39,9 @@ from src.payments.providers.razorpay import create_order
 from src.submissions.codes import new_anonymous_code
 
 
+TRACK_LOCKED = "your problem statement is locked; ask the organisers to change it"
+
+
 def _link(value: str, *, github: bool = False) -> str:
     value = value.strip()
     if not value:
@@ -68,6 +71,10 @@ class SubmissionRequest(BaseModel):
     track_id: UUID | None = None
     # The version the client edited; a mismatch means another tab saved first.
     version: int | None = None
+
+
+class TrackChoiceRequest(BaseModel):
+    track_id: UUID
 
 
 class MemberUpdateRequest(BaseModel):
@@ -194,6 +201,14 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
         with session:
             stage = _team_stage(session, registration, stage_id)
             return _finalize_submission(session, request, user, registration, stage)
+
+    @router.post("/stages/{stage_id}/track")
+    def choose_track(stage_id: UUID, payload: TrackChoiceRequest, request: Request, authorization: str = Header()):
+        """Lock the team's problem statement for this event; only an admin can change it afterwards."""
+        session, user, registration = leader_registration(request, authorization, lock=True)
+        with session:
+            stage = _team_stage(session, registration, stage_id)
+            return _choose_track(session, request, user, registration, stage, payload.track_id)
 
     # The single-submission endpoints act on the team's current event, for clients that predate stages.
     @router.put("/submission")
@@ -369,24 +384,65 @@ def _submission_for(session: Session, registration_id, stage_id, lock: bool = Fa
     return session.scalar(query.with_for_update() if lock else query)
 
 
+def _stage_track(session: Session, stage: Stage, track_id: UUID, now: datetime) -> Track:
+    track = session.get(Track, track_id)
+    if track is None or track.stage_id != stage.id:
+        raise HTTPException(422, "choose one of this event's problem statements")
+    if not stage_rules.statements_released(stage, now):
+        raise HTTPException(422, "problem statements are not revealed yet")
+    return track
+
+
+def _lock_track(submission: Submission, track_id: UUID, now: datetime) -> None:
+    submission.track_id = track_id
+    submission.track_locked_at = now
+
+
+def _choose_track(session: Session, request: Request, user: User, registration: Registration, stage: Stage, track_id: UUID) -> dict:
+    now = datetime.now(UTC)
+    if stage_rules.submission_state(stage, now) == "CLOSED":
+        raise HTTPException(403, "submission is closed")
+    track = _stage_track(session, stage, track_id, now)
+    existing = _submission_for(session, registration.id, stage.id, lock=True)
+    if existing is not None and existing.track_locked_at is not None:
+        if existing.track_id == track.id:
+            return _submission_payload(existing)
+        raise HTTPException(409, TRACK_LOCKED)
+    submission = _editable_submission(session, registration.id, stage.id)
+    _lock_track(submission, track.id, now)
+    submission.version = (submission.version or 0) + 1
+    submission.updated_at = now
+    audit(session, user, "Locked track", "registration", registration.id, event=stage.name, track=track.title)
+    session.commit()
+    request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+    return _submission_payload(submission)
+
+
 def _save_submission(session: Session, request: Request, registration: Registration, stage: Stage, payload: SubmissionRequest) -> dict:
     now = datetime.now(UTC)
     if stage_rules.submission_state(stage, now) == "CLOSED":
         raise HTTPException(403, "submission is closed")
-    if payload.track_id is not None:
-        track = session.get(Track, payload.track_id)
-        if track is None or track.stage_id != stage.id:
-            raise HTTPException(422, "choose one of this event's problem statements")
-        if not stage_rules.statements_released(stage, now):
-            raise HTTPException(422, "problem statements are not revealed yet")
+    chosen = _stage_track(session, stage, payload.track_id, now) if payload.track_id is not None else None
     submission = _editable_submission(session, registration.id, stage.id)
     if payload.version is not None and submission.version != payload.version:
         raise HTTPException(409, "submission was changed in another window; reload to continue")
+    if submission.track_locked_at is not None:
+        if chosen is not None and chosen.id != submission.track_id:
+            raise HTTPException(409, TRACK_LOCKED)
+    elif chosen is not None:
+        # Older clients pick the track with the first save; that choice locks it too.
+        _lock_track(submission, chosen.id, now)
+    else:
+        options = stage_rules.tracks(session, stage.id)
+        if len(options) > 1:
+            if not stage_rules.statements_released(stage, now):
+                raise HTTPException(409, "problem statements are not revealed yet; you can start once you pick one")
+            raise HTTPException(409, "pick your problem statement before you start")
+        # With a single problem statement there is nothing to choose.
+        if options and stage_rules.statements_released(stage, now):
+            _lock_track(submission, options[0].id, now)
     for field in ("project_name", "github_url", "pitch_deck_url", "demo_url", "video_url", "documentation_url", "description"):
         setattr(submission, field, getattr(payload, field))
-    # Older clients do not send a track; keep the one already chosen.
-    if "track_id" in payload.model_fields_set:
-        submission.track_id = payload.track_id
     submission.version = (submission.version or 0) + 1
     submission.updated_at = now
     session.commit()
@@ -409,7 +465,7 @@ def _finalize_submission(session: Session, request: Request, user: User, registr
         options = stage_rules.tracks(session, stage.id)
         # With a single problem statement there is nothing to choose.
         if len(options) == 1:
-            submission.track_id = options[0].id
+            _lock_track(submission, options[0].id, datetime.now(UTC))
         elif options:
             raise HTTPException(422, "choose a problem statement before submitting")
     submission.status = "SUBMITTED"
@@ -456,10 +512,11 @@ def _stage_payload(session: Session, stage: Stage, submission: Submission | None
 def _submission_payload(submission: Submission | None) -> dict:
     if submission is None:
         return {"status": "NOT_STARTED", "project_name": "", "github_url": "", "pitch_deck_url": "", "demo_url": "", "video_url": "",
-                "documentation_url": "", "description": "", "track_id": None, "version": 0, "updated_at": None, "submitted_at": None}
+                "documentation_url": "", "description": "", "track_id": None, "track_locked_at": None, "version": 0, "updated_at": None, "submitted_at": None}
     return {
         "status": submission.status,
         "track_id": str(submission.track_id) if submission.track_id else None,
+        "track_locked_at": submission.track_locked_at.isoformat() if submission.track_locked_at else None,
         "project_name": submission.project_name,
         "github_url": submission.github_url,
         "pitch_deck_url": submission.pitch_deck_url,

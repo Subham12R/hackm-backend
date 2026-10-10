@@ -104,8 +104,7 @@ def test_finalists_move_on_to_the_next_event_after_the_online_round(stages_clean
     # The finals submission is separate from the online one and needs a track when there are several.
     url = f"/api/v1/participant/stages/{finals['id']}/submission"
     assert harness.client.put(url, headers=finalist, json=_project(project_name="Finals", track_id=str(uuid4()))).status_code == 422
-    assert harness.client.put(url, headers=finalist, json=_project(project_name="Finals")).status_code == 200
-    assert harness.client.post(f"{url}/finalize", headers=finalist).status_code == 422
+    assert harness.client.put(url, headers=finalist, json=_project(project_name="Finals")).status_code == 409
     saved = harness.client.put(url, headers=finalist, json=_project(project_name="Finals", track_id=tracks[1]["id"]))
     assert saved.status_code == 200 and saved.json()["track_id"] == tracks[1]["id"]
     assert harness.client.post(f"{url}/finalize", headers=finalist).status_code == 200
@@ -122,6 +121,63 @@ def test_finalists_move_on_to_the_next_event_after_the_online_round(stages_clean
     assert harness.client.delete(f"/api/v1/admin/tracks/{tracks[1]['id']}", headers=admin).status_code == 409
     assert harness.client.delete(f"/api/v1/admin/tracks/{tracks[0]['id']}", headers=admin).status_code == 204
     assert harness.client.delete(f"/api/v1/admin/stages/{draft['id']}", headers=admin).status_code == 204
+
+
+def test_teams_lock_one_track_before_they_start(stages_cleanup) -> None:
+    harness = Harness()
+    admin = harness.login(staff(RoleCode.EVENT_ADMIN), "admin")
+    viewer = harness.login(staff(RoleCode.VIEWER), "admin")
+    later = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    finals = _finals(harness, admin, stages_cleanup, eligibility="ALL_PAID", statements_release_at=later)
+    health, climate = (harness.client.post(f"/api/v1/admin/stages/{finals['id']}/tracks", headers=admin, json={"title": title}).json()
+                       for title in ("Health", "Climate"))
+    payload, leader = harness.paid_team()
+    url = f"/api/v1/participant/stages/{finals['id']}"
+
+    # Nothing can be picked or drafted before the reveal.
+    assert harness.client.post(f"{url}/track", headers=leader, json={"track_id": health["id"]}).status_code == 422
+    assert harness.client.put(f"{url}/submission", headers=leader, json=_project()).status_code == 409
+    harness.client.patch(f"/api/v1/admin/stages/{finals['id']}", headers=admin, json={"statements_release_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat()})
+
+    # After the reveal the team must pick first; the pick locks.
+    assert harness.client.put(f"{url}/submission", headers=leader, json=_project()).status_code == 409
+    assert harness.client.post(f"{url}/track", headers=leader, json={"track_id": str(uuid4())}).status_code == 422
+    picked = harness.client.post(f"{url}/track", headers=leader, json={"track_id": health["id"]})
+    assert picked.status_code == 200 and picked.json()["track_id"] == health["id"] and picked.json()["track_locked_at"]
+    assert harness.client.post(f"{url}/track", headers=leader, json={"track_id": health["id"]}).status_code == 200
+    assert harness.client.post(f"{url}/track", headers=leader, json={"track_id": climate["id"]}).status_code == 409
+    assert harness.client.put(f"{url}/submission", headers=leader, json=_project(track_id=climate["id"])).status_code == 409
+    saved = harness.client.put(f"{url}/submission", headers=leader, json=_project())
+    assert saved.status_code == 200 and saved.json()["track_id"] == health["id"]
+
+    # Admins see the lock and are the only ones who can change it.
+    team = next(row for row in harness.client.get(f"/api/v1/admin/teams?search={payload['team_name']}", headers=admin).json()["items"])
+    assert [(item["stage"], item["track"]["title"], bool(item["locked_at"])) for item in team["tracks"]] == [("Grand Finale", "Health", True)]
+    override = f"/api/v1/admin/stages/{finals['id']}/teams/{team['registration_id']}/track"
+    assert harness.client.put(override, headers=viewer, json={"track_id": climate["id"], "reason": "asked"}).status_code == 403
+    assert harness.client.put(override, headers=admin, json={"track_id": climate["id"]}).status_code == 422
+    moved = harness.client.put(override, headers=admin, json={"track_id": climate["id"], "reason": "Team asked at the desk"})
+    assert moved.status_code == 200 and moved.json()["track"]["title"] == "Climate"
+    row = next(item for item in harness.client.get(f"/api/v1/admin/submissions?stage_id={finals['id']}", headers=admin).json()["submissions"]
+               if item["registration_id"] == team["registration_id"])
+    assert row["track"]["title"] == "Climate" and row["track_locked_at"]
+    # The bumped version makes a stale tab reload instead of saving over the change.
+    assert harness.client.put(f"{url}/submission", headers=leader, json=_project(version=saved.json()["version"])).status_code == 409
+
+    # Unlocking lets the team pick again.
+    unlocked = harness.client.put(override, headers=admin, json={"track_id": None, "reason": "Pick again"})
+    assert unlocked.status_code == 200 and unlocked.json() == {"track": None, "track_locked_at": None}
+    assert harness.client.post(f"{url}/track", headers=leader, json={"track_id": climate["id"]}).status_code == 200
+
+
+def test_a_single_track_is_locked_without_asking(stages_cleanup) -> None:
+    harness = Harness()
+    admin = harness.login(staff(RoleCode.EVENT_ADMIN), "admin")
+    finals = _finals(harness, admin, stages_cleanup, eligibility="ALL_PAID")
+    only = harness.client.post(f"/api/v1/admin/stages/{finals['id']}/tracks", headers=admin, json={"title": "Open"}).json()
+    _payload, leader = harness.paid_team()
+    saved = harness.client.put(f"/api/v1/participant/stages/{finals['id']}/submission", headers=leader, json=_project())
+    assert saved.status_code == 200 and saved.json()["track_id"] == only["id"] and saved.json()["track_locked_at"]
 
 
 def test_winners_are_marked_per_event_and_per_track(stages_cleanup) -> None:

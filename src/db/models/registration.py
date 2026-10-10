@@ -193,6 +193,8 @@ class Submission(Base):
     # One submission per team per stage; the track is the problem statement the team chose.
     stage_id: Mapped[UUID] = mapped_column(ForeignKey("stages.id"), index=True)
     track_id: Mapped[UUID | None] = mapped_column(ForeignKey("tracks.id", ondelete="SET NULL"))
+    # Set once the team commits to its track; after that only an admin can change it.
+    track_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(40), default="DRAFT")
     project_name: Mapped[str] = mapped_column(String(200), default="")
     github_url: Mapped[str] = mapped_column(String(500), default="")

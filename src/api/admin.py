@@ -28,7 +28,7 @@ from src.db.models.registration import (
     RegistrationMember,
     Submission,
 )
-from src.db.models.stage import SubmissionAward
+from src.db.models.stage import SubmissionAward, Track
 from src.events import stages as stage_rules
 from src.events.service import ACTIVE_EVENT_ID, current_event
 from src.judging import service as judging
@@ -210,6 +210,7 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
                     "project_name": submission.project_name if submission else "",
                     "description": submission.description if submission else "",
                     "track": {"id": str(submission.track_id), "title": track_names.get(submission.track_id, "")} if submission and submission.track_id else None,
+                    "track_locked_at": submission.track_locked_at.isoformat() if submission and submission.track_locked_at else None,
                     "links": _submission_links(submission),
                     "start_time": registration.created_at.isoformat(),
                     "updated_at": submission.updated_at.isoformat() if submission and submission.updated_at else None,
@@ -449,6 +450,7 @@ def _team_rows(session, registrations: list[Registration], timezone: str) -> lis
         if user_id
     }
     reviewers = {user.id: user.display_name for user in session.scalars(select(User).where(User.id.in_(reviewer_ids)))} if reviewer_ids else {}
+    choices = _track_choices(session, registrations)
     rows = []
     for registration in registrations:
         team = members.get(registration.id, [])
@@ -487,8 +489,40 @@ def _team_rows(session, registrations: list[Registration], timezone: str) -> lis
                 "decided_at": registration.finals_decided_at.isoformat() if registration.finals_decided_at else None,
                 "decided_by": reviewers.get(registration.finals_decided_by_user_id),
             },
+            "tracks": choices.get(registration.id, []),
         })
     return rows
+
+
+def _track_choices(session, registrations: list[Registration]) -> dict:
+    """Each team's locked problem statement in every event that has more than one to choose from."""
+    ids = [registration.id for registration in registrations]
+    event_stages = stage_rules.stages(session, ACTIVE_EVENT_ID)
+    titles: dict = {}
+    per_stage: dict = {}
+    for track in session.scalars(select(Track).where(Track.stage_id.in_([stage.id for stage in event_stages]))):
+        titles[track.id] = track.title
+        per_stage[track.stage_id] = per_stage.get(track.stage_id, 0) + 1
+    choice_stages = [stage for stage in event_stages if per_stage.get(stage.id, 0) > 1]
+    if not ids or not choice_stages:
+        return {}
+    picked = {
+        (submission.registration_id, submission.stage_id): submission
+        for submission in session.scalars(select(Submission).where(
+            Submission.registration_id.in_(ids), Submission.stage_id.in_([stage.id for stage in choice_stages])))
+    }
+    result: dict = {}
+    for registration in registrations:
+        for stage in choice_stages:
+            if not stage_rules.is_eligible(stage, registration):
+                continue
+            submission = picked.get((registration.id, stage.id))
+            result.setdefault(registration.id, []).append({
+                "stage_id": str(stage.id), "stage": stage.name,
+                "track": {"id": str(submission.track_id), "title": titles.get(submission.track_id, "")} if submission and submission.track_id else None,
+                "locked_at": submission.track_locked_at.isoformat() if submission and submission.track_locked_at else None,
+            })
+    return result
 
 
 def _review_row(session, registration: Registration) -> dict:
