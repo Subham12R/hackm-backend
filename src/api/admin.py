@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
+from src import realtime
 from src.api.deps import authenticated_user
 from src.audit import audit
 from src.auth.policies import (
@@ -277,6 +278,8 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
             submission.updated_at = datetime.now(UTC)
             audit(session, actor, "Reopened submission", "submission", team_code(registration_id), event=stage.name)
             session.commit()
+            realtime.notify(request, realtime.team_channel(registration_id), realtime.message(
+                "submission", "Your submission was reopened", f"{stage.name}: you can edit and submit it again.", "IMPORTANT", refresh=["stages"]))
             request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             return {"status": submission.status}
 

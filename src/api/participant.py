@@ -1,3 +1,7 @@
+import asyncio
+import contextlib
+import json
+import os
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 from urllib.parse import urlparse
@@ -5,12 +9,15 @@ from uuid import UUID
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from src import realtime
 from src.api.deps import authenticated_user
 from src.api.registrations import _phone
 from src.audit import audit
@@ -107,6 +114,44 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
             session.close()
             raise HTTPException(404, "registration not found")
         return session, user, registration
+
+    @router.get("/notifications/stream")
+    async def notification_stream(request: Request, authorization: str = Header()):
+        """Server-Sent Events: announcements for everyone plus this team's own updates, as they happen."""
+        def resolve() -> str:
+            session, _user, registration = leader_registration(request, authorization)
+            with session:
+                return str(registration.id)
+
+        registration_id = await run_in_threadpool(resolve)
+        channels = [realtime.EVERYONE, realtime.team_channel(registration_id)]
+        notifier = request.app.state.notifier
+        heartbeat = float(os.getenv("NOTIFY_HEARTBEAT_SECONDS", "20"))
+
+        async def events():
+            # Reconnect after 5 s; "ready" tells the dashboard to refetch whatever it missed while offline.
+            yield "retry: 5000\nevent: ready\ndata: {}\n\n"
+            stream = notifier.subscribe(channels).__aiter__()
+            pending = asyncio.ensure_future(stream.__anext__())
+            try:
+                while True:
+                    done, _ = await asyncio.wait({pending}, timeout=heartbeat)
+                    if await request.is_disconnected():
+                        break
+                    if not done:
+                        # Comments keep proxies (nginx, Cloudflare) from closing an idle connection.
+                        yield ": ping\n\n"
+                        continue
+                    yield f"event: notification\ndata: {json.dumps(pending.result())}\n\n"
+                    pending = asyncio.ensure_future(stream.__anext__())
+            finally:
+                pending.cancel()
+                with contextlib.suppress(BaseException):
+                    await pending
+                await stream.aclose()
+
+        return StreamingResponse(events(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
 
     @router.get("/dashboard")
     def dashboard(request: Request, authorization: str = Header()):

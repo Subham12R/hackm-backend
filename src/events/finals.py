@@ -38,9 +38,10 @@ def unreleased(session: Session, event_id) -> list[Registration]:
     ))
 
 
-def release(session: Session, event: Event, now: datetime) -> dict[str, int]:
-    """Email every decided team whose decision changed since it was last told; returns counts."""
+def release(session: Session, event: Event, now: datetime) -> tuple[dict[str, int], list[tuple[str, str]]]:
+    """Email every decided team whose decision changed since it was last told; returns counts and (team id, decision) pairs."""
     counts = {"ACCEPTED": 0, "DECLINED": 0, "emails": 0}
+    released: list[tuple[str, str]] = []
     for registration in unreleased(session, event.id):
         members = list(session.scalars(
             select(RegistrationMember).where(RegistrationMember.registration_id == registration.id)
@@ -60,7 +61,8 @@ def release(session: Session, event: Event, now: datetime) -> dict[str, int]:
         registration.finals_notified_status = registration.finals_status
         registration.finals_notified_at = now
         counts[registration.finals_status] += 1
-    return counts
+        released.append((str(registration.id), registration.finals_status))
+    return counts, released
 
 
 def apply_rsvp(session: Session, registration: Registration, event: Event, answer: str, now: datetime) -> None:

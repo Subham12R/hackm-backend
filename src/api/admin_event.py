@@ -9,6 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints, model_validator
 from sqlalchemy import func, select
 
+from src import realtime
 from src.api.deps import authenticated_user
 from src.audit import audit
 from src.auth.policies import ADMIN_READ_ROLES, EVENT_CONTROL_ROLES
@@ -119,6 +120,9 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
                 if getattr(target, opens) and getattr(target, closes) and getattr(target, opens) >= getattr(target, closes):
                     raise HTTPException(422, f"{opens.replace('_', ' ')} must be before {closes.replace('_', ' ')}")
             event.registration_enabled = event.registration_mode != "CLOSED"
+            if "registration_mode" in changes:
+                # The audit log keeps the older field too, so past and present entries read alike.
+                changes["registration_enabled"] = event.registration_enabled
             if changes:
                 event.updated_at = datetime.now(UTC)
                 event.updated_by_user_id = actor.id
@@ -221,6 +225,9 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
                 item.emailed_at = item.published_at
             audit(session, actor, "Published announcement", "announcement", item.id, title=item.title, emailed=recipients)
             session.commit()
+            realtime.notify(request, realtime.EVERYONE, realtime.message(
+                "announcement", item.title, item.body[:280], item.level, id=str(item.id), refresh=["announcements"],
+            ))
             background.add_task(dispatch_pending, request.app.state.database_url, request.app.state.email_sender, 500)
             return _announcement_payload(item, {actor.id: actor.display_name}, {}, 0)
 

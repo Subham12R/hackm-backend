@@ -8,6 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Re
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
+from src import realtime
 from src.api.deps import authenticated_user
 from src.audit import audit
 from src.auth.policies import ADMIN_READ_ROLES, CHECKIN_ROLES, TEAM_REVIEW_ROLES
@@ -100,10 +101,16 @@ def admin_checkin_router(public_key: Ed25519PublicKey) -> APIRouter:
                 raise HTTPException(409, "every decision has already been emailed")
             if any(team.finals_status == "ACCEPTED" for team in pending) and (event.finals_rsvp_closes_at is None or event.finals_rsvp_closes_at <= now):
                 raise HTTPException(422, "set an RSVP deadline before releasing acceptances")
-            counts = finals.release(session, event, now)
+            counts, released = finals.release(session, event, now)
             audit(session, actor, "Released finals decisions", "event", event.id, accepted=counts["ACCEPTED"], rejected=counts["DECLINED"], emails=counts["emails"])
             session.commit()
             request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            for registration_id, decision in released:
+                realtime.notify(request, realtime.team_channel(registration_id), realtime.message(
+                    "finals", "You're in the offline finals!" if decision == "ACCEPTED" else "Your finals decision is in",
+                    "Confirm your attendance on the dashboard." if decision == "ACCEPTED" else "Open the dashboard to read it.",
+                    "IMPORTANT" if decision == "ACCEPTED" else "INFO", refresh=["dashboard", "stages"],
+                ))
             background.add_task(dispatch_pending, request.app.state.database_url, request.app.state.email_sender, counts["emails"] + 10)
             return {"released": {"ACCEPTED": counts["ACCEPTED"], "DECLINED": counts["DECLINED"]}, "emails": counts["emails"]}
 
@@ -160,6 +167,9 @@ def admin_checkin_router(public_key: Ed25519PublicKey) -> APIRouter:
                 audit(session, actor, "Participant checked in" if payload.checked_in else "Check-in undone", "registration_member", member.id,
                       team=registration.team_name, name=member.full_name)
                 session.commit()
+                if payload.checked_in:
+                    realtime.notify(request, realtime.team_channel(registration.id), realtime.message(
+                        "checkin", f"{member.full_name} checked in", "Welcome to HackMatrix!", refresh=["dashboard"]))
             row = session.get(MemberCheckin, member.id)
             return {"member_id": str(member.id), "checked_in_at": row.checked_in_at.isoformat() if row else None}
 
@@ -178,6 +188,9 @@ def admin_checkin_router(public_key: Ed25519PublicKey) -> APIRouter:
                 audit(session, actor, "Team checked in" if payload.checked_in else "Team check-in undone", "registration", registration.id,
                       team=registration.team_name, members=changed)
                 session.commit()
+                if payload.checked_in:
+                    realtime.notify(request, realtime.team_channel(registration.id), realtime.message(
+                        "checkin", "Your team is checked in", "Welcome to HackMatrix!", refresh=["dashboard"]))
             return {"registration_id": str(registration.id), "changed": changed}
 
     return router

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import func, select
 
+from src import realtime
 from src.api.deps import authenticated_user
 from src.audit import audit
 from src.auth.policies import ADMIN_READ_ROLES, ASSIGNMENT_ROLES, EVENT_CONTROL_ROLES, RoleCode
@@ -340,6 +341,10 @@ def admin_judging_router(public_key: Ed25519PublicKey) -> APIRouter:
             audit(session, actor, f"Results {action}", "round", round_.id, round=round_.name)
             session.commit()
             request.app.state.cache.invalidate(PUBLIC_LEADERBOARD, ADMIN_AGGREGATES)
+            if action == "release":
+                realtime.notify(request, realtime.EVERYONE, realtime.message(
+                    "results", f"{round_.name} results are out", "See your scores and the leaderboard on the dashboard.", "IMPORTANT",
+                    refresh=["results", "leaderboard"]))
             return {"round": _round_summary(session, round_), "snapshot": _snapshot_payload(session, snapshot)}
 
     @router.post("/rounds/{round_id}/results/generate")

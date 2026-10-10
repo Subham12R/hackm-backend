@@ -123,6 +123,17 @@ Teams register and pay once; each event ("stage" in the code) has its own submis
 
 Public, prefix `/api/v1/public`: `GET /event`, `GET /leaderboard`, `GET /gallery`, `POST /contact`.
 
+## Live notifications
+
+Participant dashboards hold one Server-Sent Events connection (`GET /api/v1/participant/notifications/stream`). Endpoints
+publish after they commit: announcements and released results go to every team; finals decisions, check-ins, organiser
+track changes and reopened submissions go to that team only. The dashboard shows each one as a toast and refetches.
+
+- `REDIS_URL` carries messages between API workers and containers (Redis pub/sub on `hm:notify:*`). Without it delivery
+  is in-process, which is only correct with a single worker.
+- `NOTIFY_HEARTBEAT_SECONDS` (default 20) keeps idle connections open through nginx and Cloudflare.
+- Both nginx configs have a dedicated `location` for the stream with buffering off and a one-hour read timeout.
+
 ## Email senders
 
 Every email goes out from one of three mailboxes on `hackmatrix.codes`:
