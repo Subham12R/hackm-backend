@@ -28,10 +28,10 @@ def _text(value: str) -> str:
     return escape(value).replace("\r\n", "\n").replace("\n", "<br>")
 
 
-def _banner() -> str:
+def _banner(url: str | None = None, alt: str = BANNER_ALT) -> str:
     site = escape(os.getenv("PARTICIPANT_APP_URL", "https://hackmatrix.codes"), quote=True)
     return (
-        f'<a href="{site}" style="text-decoration:none;"><img src="{escape(banner_url(), quote=True)}" width="564" alt="{escape(BANNER_ALT, quote=True)}" '
+        f'<a href="{site}" style="text-decoration:none;"><img src="{escape(url or banner_url(), quote=True)}" width="564" alt="{escape(alt, quote=True)}" '
         f'style="display:block;width:100%;max-width:564px;height:auto;border:0;border-radius:20px;background:{PAGE};font-family:{SANS};font-size:14px;line-height:1.4;color:{ACCENT};"></a>'
     )
 
@@ -82,8 +82,33 @@ def action_email(
     original_amount: str | None = None,
     eyebrow: str = "HackMatrix 26",
 ) -> str:
-    href = escape(url, quote=True)
-    preheader = escape(" ".join(intro.split())[:140])
+    content = f"""<span style="display:inline-block;padding:6px 14px;border-radius:999px;background:{ACCENT_SOFT};font-family:{SANS};font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:{ACCENT};">{escape(eyebrow)}</span>
+                      <h1 class="headline" style="margin:18px 0 0;font-family:{SERIF};font-size:34px;font-weight:400;line-height:1.18;letter-spacing:-0.5px;color:{INK};">{escape(title)}</h1>
+                      <p style="margin:16px 0 0;font-family:{SANS};font-size:16px;line-height:1.7;color:{BODY};">{_text(intro)}</p>
+                      {_details(rows, original_amount)}
+                      {_steps(steps)}
+                      {button(action, url)}
+                      <p style="margin:26px 0 0;font-family:{SANS};font-size:13px;line-height:1.6;color:{MUTED};">{_text(note)}</p>
+                      {link_fallback(url)}"""
+    return email_shell(title=title, preheader=intro, banner=_banner(), content=content)
+
+
+def button(label: str, url: str) -> str:
+    return f"""<table role="presentation" cellspacing="0" cellpadding="0" style="margin-top:32px;"><tr>
+                        <td style="border-radius:999px;background:{INK};">
+                          <a href="{escape(url, quote=True)}" style="display:inline-block;padding:16px 30px;border-radius:999px;font-family:{SANS};font-size:15px;font-weight:700;letter-spacing:0.02em;color:#fffaf3;text-decoration:none;">{escape(label)}&nbsp;&nbsp;&rarr;</a>
+                        </td>
+                      </tr></table>"""
+
+
+def link_fallback(url: str) -> str:
+    return f"""<p style="margin:14px 0 0;padding:12px 16px;border-radius:14px;background:{PANEL};font-family:{SANS};font-size:12px;line-height:1.5;color:{MUTED};">Button not working? Paste this link into your browser:<br><span style="color:{BODY};word-break:break-all;">{escape(url)}</span></p>"""
+
+
+def email_shell(*, title: str, preheader: str, banner: str, content: str) -> str:
+    """The branded page every HackMatrix email shares; `banner` may be empty for a text-only email."""
+    preheader = escape(" ".join(preheader.split())[:140])
+    banner_row = f"""<tr><td class="banner" style="padding:18px 18px 0;">{banner}</td></tr>""" if banner else ""
     return f"""<!doctype html>
 <html lang="en">
   <head>
@@ -117,21 +142,10 @@ def action_email(
             <tr>
               <td style="background:#ffffff;border-radius:28px;box-shadow:0 18px 40px rgba(31,26,23,0.08);">
                 <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
-                  <tr><td class="banner" style="padding:18px 18px 0;">{_banner()}</td></tr>
+                  {banner_row}
                   <tr>
                     <td class="card" style="padding:34px 40px 40px;">
-                      <span style="display:inline-block;padding:6px 14px;border-radius:999px;background:{ACCENT_SOFT};font-family:{SANS};font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:{ACCENT};">{escape(eyebrow)}</span>
-                      <h1 class="headline" style="margin:18px 0 0;font-family:{SERIF};font-size:34px;font-weight:400;line-height:1.18;letter-spacing:-0.5px;color:{INK};">{escape(title)}</h1>
-                      <p style="margin:16px 0 0;font-family:{SANS};font-size:16px;line-height:1.7;color:{BODY};">{_text(intro)}</p>
-                      {_details(rows, original_amount)}
-                      {_steps(steps)}
-                      <table role="presentation" cellspacing="0" cellpadding="0" style="margin-top:32px;"><tr>
-                        <td style="border-radius:999px;background:{INK};">
-                          <a href="{href}" style="display:inline-block;padding:16px 30px;border-radius:999px;font-family:{SANS};font-size:15px;font-weight:700;letter-spacing:0.02em;color:#fffaf3;text-decoration:none;">{escape(action)}&nbsp;&nbsp;&rarr;</a>
-                        </td>
-                      </tr></table>
-                      <p style="margin:26px 0 0;font-family:{SANS};font-size:13px;line-height:1.6;color:{MUTED};">{_text(note)}</p>
-                      <p style="margin:14px 0 0;padding:12px 16px;border-radius:14px;background:{PANEL};font-family:{SANS};font-size:12px;line-height:1.5;color:{MUTED};">Button not working? Paste this link into your browser:<br><span style="color:{BODY};word-break:break-all;">{escape(url)}</span></p>
+                      {content}
                     </td>
                   </tr>
                 </table>
