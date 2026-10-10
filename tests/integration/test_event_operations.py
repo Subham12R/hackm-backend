@@ -76,6 +76,26 @@ def test_admin_event_control_validates_and_audits() -> None:
         _reset_windows()
 
 
+def test_registration_switch_closes_registration_and_is_public() -> None:
+    harness = Harness()
+    admin = harness.login(staff(RoleCode.EVENT_ADMIN), "admin")
+    try:
+        off = harness.client.patch("/api/v1/admin/event", headers=admin, json={"registration_enabled": False})
+        assert off.status_code == 200 and off.json()["registration"] == {**off.json()["registration"], "enabled": False, "state": "CLOSED"}
+        public = harness.client.get("/api/v1/public/event").json()["registration"]
+        assert public["enabled"] is False and public["state"] == "CLOSED"
+        assert harness.register()[1].status_code == 403
+        assert harness.client.patch("/api/v1/admin/event", headers=admin, json={"registration_enabled": None}).json()["registration"]["enabled"] is False
+        on = harness.client.patch("/api/v1/admin/event", headers=admin, json={"registration_enabled": True})
+        assert on.json()["registration"]["state"] == "OPEN" and harness.register()[1].status_code == 202
+        logs = harness.client.get("/api/v1/admin/logs?action=Updated%20event%20control", headers=admin).json()["logs"]
+        assert any("registration_enabled" in str(log) for log in logs)
+    finally:
+        with db() as session:
+            session.execute(update(Event).where(Event.id == ACTIVE_EVENT_ID).values(registration_enabled=True))
+            session.commit()
+
+
 def test_challenge_stays_hidden_until_release_time() -> None:
     harness = Harness()
     _payload, leader = harness.paid_team()
