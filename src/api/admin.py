@@ -478,6 +478,7 @@ def _team_rows(session, registrations: list[Registration], timezone: str) -> lis
             "acm_members": acm_count,
             "category": registration.category,
             "status": registration.status,
+            "fee_waived": registration.fee_waived,
             "adjustment": {"status": registration.adjustment_status, "amount_minor": registration.adjustment_amount_minor},
             "review": {
                 "status": registration.details_review_status,

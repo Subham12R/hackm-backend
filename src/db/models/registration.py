@@ -95,6 +95,25 @@ class Registration(Base):
     finals_status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
     finals_decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finals_decided_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    # Invited teams whose entry fee the organisers waived; they never owe a balance.
+    fee_waived: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class TeamInvite(Base):
+    """An emailed link that lets one leader register outside the registration window, optionally free."""
+
+    __tablename__ = "team_invites"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    event_id: Mapped[UUID] = mapped_column(ForeignKey("events.id"), index=True)
+    email_normalized: Mapped[str] = mapped_column(String(320), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    waive_payment: Mapped[bool] = mapped_column(Boolean, default=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    registration_id: Mapped[UUID | None] = mapped_column(ForeignKey("registrations.id", ondelete="SET NULL"))
+    invited_by_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class RegistrationMember(Base):

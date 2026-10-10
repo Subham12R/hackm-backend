@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from src.api.deps import authenticated_user
 from src.audit import audit
@@ -120,6 +121,31 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
             request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             return registration_detail_payload(session, registration)
 
+    @router.delete("/registrations/{registration_id}", status_code=204)
+    def delete_unpaid(registration_id: UUID, request: Request, authorization: str = Header()):
+        """Erase an abandoned registration that never took money; anything with a payment on record is kept."""
+        session, actor = authenticated_user(request, authorization, public_key, TEAM_REVIEW_ROLES)
+        with session:
+            registration = session.get(Registration, registration_id, with_for_update=True)
+            if registration is None:
+                raise HTTPException(404, "registration not found")
+            if registration.status != "ABANDONED":
+                raise HTTPException(409, "only abandoned registrations can be deleted; cancel an unpaid one first")
+            orders = session.scalars(select(PaymentOrder).where(PaymentOrder.registration_id == registration.id)).all()
+            attempts = session.scalars(select(PaymentAttempt).where(PaymentAttempt.order_id.in_([order.id for order in orders]))).all() if orders else []
+            if any(attempt.status != "FAILED" for attempt in attempts):
+                raise HTTPException(409, "this registration has a payment on record and is kept")
+            audit(session, actor, "Deleted abandoned registration", "registration", registration.id, team=registration.team_name, leader=registration.leader_email)
+            for row in [*attempts, *orders, *session.scalars(select(RegistrationMember).where(RegistrationMember.registration_id == registration.id))]:
+                session.delete(row)
+            session.flush()
+            session.delete(registration)
+            try:
+                session.commit()
+            except IntegrityError:
+                raise HTTPException(409, "this registration is referenced by other records and is kept") from None
+            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+
     @router.post("/payments/{attempt_id}/accept")
     def accept_payment(attempt_id: UUID, request: Request, background: BackgroundTasks, authorization: str = Header()):
         session, actor = authenticated_user(request, authorization, public_key, MONEY_ROLES)
@@ -216,6 +242,7 @@ def registration_detail_payload(session, registration: Registration) -> dict:
         "team_name": registration.team_name,
         "leader_email": registration.leader_email,
         "status": registration.status,
+        "fee_waived": registration.fee_waived,
         "category": registration.category,
         "pricing_tier": registration.pricing_tier,
         "quoted_amount_minor": registration.quoted_amount_minor,

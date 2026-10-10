@@ -116,6 +116,22 @@ def admin_judging_router(public_key: Ed25519PublicKey) -> APIRouter:
                 request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             return _round_summary(session, round_)
 
+    @router.delete("/rounds/{round_id}", status_code=204)
+    def delete_round(round_id: UUID, request: Request, authorization: str = Header()):
+        """Remove a round set up by mistake; criteria, judge assignments and draft scores go with it."""
+        session, actor = authenticated_user(request, authorization, public_key, ASSIGNMENT_ROLES)
+        with session:
+            round_ = load_round(session, round_id, lock=True)
+            if session.scalar(select(Scorecard.id).where(Scorecard.round_id == round_.id, Scorecard.status == "SUBMITTED").limit(1)) is not None:
+                raise HTTPException(409, "judges have submitted scores in this round; it cannot be deleted")
+            if session.scalar(select(ResultSnapshot.id).where(ResultSnapshot.round_id == round_.id, ResultSnapshot.status == "RELEASED")) is not None:
+                raise HTTPException(409, "this round's results are released; unpublish them first")
+            audit(session, actor, "Deleted judging round", "round", round_.id, name=round_.name)
+            session.delete(round_)
+            session.commit()
+            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            request.app.state.cache.invalidate(PUBLIC_LEADERBOARD)
+
     @router.put("/rounds/{round_id}/criteria")
     def replace_criteria(round_id: UUID, payload: CriteriaRequest, request: Request, authorization: str = Header()):
         session, actor = authenticated_user(request, authorization, public_key, ASSIGNMENT_ROLES)

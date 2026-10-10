@@ -88,7 +88,7 @@ def test_only_finals_teams_check_in_with_analytics() -> None:
 
     accepted_name = f"Finalist {uuid4().hex[:8]}"
     other_name = f"Waitlist {uuid4().hex[:8]}"
-    harness.paid_team(team_name=accepted_name)
+    _payload, finalist = harness.paid_team(team_name=accepted_name)
     harness.paid_team(team_name=other_name)
     unpaid_payload, unpaid = harness.register()
     assert unpaid.status_code == 202
@@ -99,6 +99,8 @@ def test_only_finals_teams_check_in_with_analytics() -> None:
 
     accepted = team(accepted_name)
     assert accepted["finals"]["status"] == "PENDING"
+    pending = harness.client.get("/api/v1/participant/dashboard", headers=finalist).json()["finals"]
+    assert pending["status"] == "PENDING" and pending["members"] == []
     unpaid_team = team(unpaid_payload["team_name"])
 
     # Viewers cannot decide, unpaid teams cannot be accepted.
@@ -135,6 +137,10 @@ def test_only_finals_teams_check_in_with_analytics() -> None:
     assert after["timeline"] and after["timeline"][-1]["total"] == after["summary"]["checked_in"]
     mine = next(item for item in after["teams"] if item["team_name"] == accepted_name)
     assert mine["checked_in"] == 1 and next(m for m in mine["members"] if m["id"] == leader["id"])["checked_in_by"]
+    # The team sees its own arrivals on the participant dashboard.
+    finals = harness.client.get("/api/v1/participant/dashboard", headers=finalist).json()["finals"]
+    assert finals["status"] == "ACCEPTED" and finals["checked_in"] == 1 and finals["member_count"] == 2
+    assert {m["member_id"]: bool(m["checked_in_at"]) for m in finals["members"]} == {m["id"]: m["id"] == leader["id"] for m in mine["members"]}
 
     whole = harness.client.post(f"/api/v1/admin/checkins/teams/{accepted['registration_id']}", headers=desk, json={"checked_in": True})
     assert whole.json()["changed"] == 1

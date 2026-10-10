@@ -118,6 +118,17 @@ def admin_ops_router(public_key: Ed25519PublicKey) -> APIRouter:
             background.add_task(dispatch_pending, request.app.state.database_url, request.app.state.email_sender)
             return _contact_detail(session, message)
 
+    @router.delete("/contacts/{message_id}", status_code=204)
+    def delete_contact(message_id: UUID, request: Request, authorization: str = Header()):
+        session, actor = authenticated_user(request, authorization, public_key, SUPPORT_ROLES)
+        with session:
+            message = session.get(ContactMessage, message_id, with_for_update=True)
+            if message is None:
+                raise HTTPException(404, "message not found")
+            audit(session, actor, "Deleted contact message", "contact", message.id, email=message.email, subject=message.subject)
+            session.delete(message)
+            session.commit()
+
     # Staff, invites ------------------------------------------------------------
 
     @router.get("/staff")

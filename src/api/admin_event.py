@@ -235,9 +235,7 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
             item = session.get(Announcement, announcement_id, with_for_update=True)
             if item is None:
                 raise HTTPException(404, "announcement not found")
-            if item.published_at is not None:
-                raise HTTPException(409, "published announcements are kept; unpublish instead")
-            audit(session, actor, "Deleted announcement draft", "announcement", item.id, title=item.title)
+            audit(session, actor, "Deleted announcement", "announcement", item.id, title=item.title, published=item.published_at is not None)
             session.delete(item)
             session.commit()
 
