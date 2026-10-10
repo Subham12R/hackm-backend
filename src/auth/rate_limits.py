@@ -21,6 +21,13 @@ def is_limited(session: Session, key: str, now: datetime, limit: int, window: ti
     return False
 
 
+def refund_attempt(session: Session, key: str) -> None:
+    """Give back one attempt counted by is_limited, for a failure that was ours rather than the caller's."""
+    bucket = session.get(RateLimitBucket, key, with_for_update=True)
+    if bucket is not None and bucket.count > 0:
+        bucket.count -= 1
+
+
 def is_blocked(session: Session, key: str, now: datetime, limit: int, window: timedelta) -> bool:
     """Read-only check: has this key already used its budget in the current window?"""
     bucket = session.get(RateLimitBucket, key)
