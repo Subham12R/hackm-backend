@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from src.audit import audit
 from src.auth.owner import is_owner_email
-from src.auth.rate_limits import is_limited
+from src.auth.rate_limits import is_limited, refund_attempt
 from src.cache import ADMIN_AGGREGATES
 from src.communications.outbox import dispatch_pending
 from src.db.models.registration import PaymentOrder, PaymentWebhookEvent, Registration, RegistrationMember, TeamInvite
@@ -237,6 +237,10 @@ def create_registration(payload: RegistrationRequest, request: Request, backgrou
         created = create_order(api, charge, str(registration_id), {"purpose": payments.REGISTRATION})
     except Exception:
         logger.exception("razorpay order creation failed")
+        # The provider failing (bad keys, outage) is not the registrant retrying too often.
+        with _session(request) as session:
+            refund_attempt(session, f"registration:{leader_email}")
+            session.commit()
         raise HTTPException(502, "payment provider is unavailable") from None
 
     # Phase 2, under the event lock: re-check everything (state may have moved) and write atomically.

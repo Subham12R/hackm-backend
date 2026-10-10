@@ -90,3 +90,34 @@ def test_verified_registration_ignores_client_price_and_fulfills_captured_webhoo
     assert user is not None and user.status == UserStatus.PENDING_ACTIVATION
     assert registration.status == "PAID"
     assert client.post("/api/v1/payments/razorpay/webhook", content=body, headers={"X-Razorpay-Signature": "bad", "X-Razorpay-Event-Id": f"evt_{uuid4().hex}"}).status_code == 400
+
+
+class FailingOrders:
+    def create(self, payload):
+        raise RuntimeError("Authentication failed")
+
+
+class FailingPaymentClient:
+    def __init__(self) -> None:
+        self.order = FailingOrders()
+
+
+def test_provider_failures_do_not_use_up_registration_attempts() -> None:
+    config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL)
+    command.upgrade(config, "head")
+    app = create_app(database_url=TEST_DATABASE_URL, email_sender=LocalEmailSink(), payment_client=FailingPaymentClient(),
+                     razorpay_webhook_secret="webhook-secret", razorpay_key_id="rzp_test_public")
+    client = TestClient(app)
+    email = f"leader-{uuid4()}@example.com"
+    payload = {
+        "team_name": f"Team {uuid4()}",
+        "rules_consent": True,
+        "privacy_consent": True,
+        "members": [
+            {"role": "leader", "full_name": "Leader", "email": email, "phone": "9812345678", "college": "Other College", "is_acm_member": False},
+            {"role": "member", "full_name": "Member", "email": f"member-{uuid4()}@example.com", "phone": "9812345679", "college": "Other College", "is_acm_member": False},
+        ],
+    }
+    statuses = {client.post("/api/v1/registrations", json=payload).status_code for _ in range(12)}
+    assert statuses == {502}
