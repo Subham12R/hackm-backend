@@ -2,6 +2,7 @@ import json
 import logging
 import re
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -11,9 +12,11 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from src.audit import audit
 from src.auth.rate_limits import is_limited
+from src.cache import ADMIN_AGGREGATES
 from src.communications.outbox import dispatch_pending
-from src.db.models.registration import PaymentOrder, PaymentWebhookEvent, Registration, RegistrationMember
+from src.db.models.registration import PaymentOrder, PaymentWebhookEvent, Registration, RegistrationMember, TeamInvite
 from src.db.session import create_db_engine
 from src.events.service import ACTIVE_EVENT_ID, current_event
 from src.events.windows import ensure_window_open
@@ -27,6 +30,8 @@ router = APIRouter()
 PENDING_HOLD = timedelta(hours=24)
 # A pending order is never replaced while a checkout may still be open on it.
 REPLACE_AFTER = timedelta(minutes=30)
+# Team invite links are short-lived on purpose; organisers resend if one lapses.
+INVITE_TTL = timedelta(minutes=10)
 PHONE_PATTERN = re.compile(r"^[0-9+()\-\s]{7,20}$")
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
@@ -62,6 +67,8 @@ class RegistrationRequest(BaseModel):
     rules_consent: bool
     privacy_consent: bool
     members: list[MemberRequest] = Field(min_length=2, max_length=4)
+    # From an organiser's invite email: skips the registration window, and payment if waived.
+    invite_token: Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)] = ""
 
 
 class ConfirmPaymentRequest(BaseModel):
@@ -83,13 +90,37 @@ def _dispatch_email(request: Request, background: BackgroundTasks) -> None:
     background.add_task(dispatch_pending, request.app.state.database_url, request.app.state.email_sender)
 
 
+def invite_digest(token: str) -> str:
+    return sha256(token.encode()).hexdigest()
+
+
+def _live_invite(session: Session, token: str, now: datetime, lock: bool = False) -> TeamInvite:
+    query = select(TeamInvite).where(TeamInvite.token_hash == invite_digest(token), TeamInvite.event_id == ACTIVE_EVENT_ID)
+    invite = session.scalar(query.with_for_update() if lock else query)
+    if invite is None:
+        raise HTTPException(404, "this invite link is not valid")
+    if invite.expires_at <= now:
+        raise HTTPException(410, "this invite link has expired; ask the organisers for a new one")
+    # A paying invite stays usable until it expires so the leader can retry checkout; a free one is single use.
+    if invite.waive_payment and invite.used_at is not None:
+        raise HTTPException(410, "this invite link has already been used")
+    return invite
+
+
+@router.get("/api/v1/registrations/invite")
+def invite_details(request: Request, token: str = Query(min_length=1, max_length=100)):
+    with _session(request) as session:
+        invite = _live_invite(session, token, datetime.now(UTC))
+        return {"email": invite.email_normalized, "waive_payment": invite.waive_payment, "expires_at": invite.expires_at.isoformat()}
+
+
 def _member_key(member) -> tuple:
     return (member.role, member.full_name, member.email.lower() if hasattr(member, "email") else member.email_normalized,
             member.phone, member.college, member.is_acm_member, (member.acm_id or "").upper())
 
 
 @router.post("/api/v1/registrations", status_code=202)
-def create_registration(payload: RegistrationRequest, request: Request):
+def create_registration(payload: RegistrationRequest, request: Request, background: BackgroundTasks):
     if not payload.rules_consent or not payload.privacy_consent:
         raise HTTPException(422, "consent is required")
     leaders = [member for member in payload.members if member.role == "leader"]
@@ -98,13 +129,21 @@ def create_registration(payload: RegistrationRequest, request: Request):
     emails = [member.email.lower() for member in payload.members]
     if len(set(emails)) != len(emails):
         raise HTTPException(422, "each member needs a different email")
-    api = request.app.state.payment_client
-    if api is None:
-        raise HTTPException(503, "payment provider is not configured")
     price = calculate_registration_price([member.model_dump() for member in payload.members])
     leader_email = leaders[0].email.lower()
     team_name = " ".join(payload.team_name.split())
     now = datetime.now(UTC)
+    invited = bool(payload.invite_token)
+    if invited:
+        with _session(request) as session:
+            invite = _live_invite(session, payload.invite_token, now)
+            if invite.email_normalized != leader_email:
+                raise HTTPException(403, "this invite is for a different team leader email")
+            if invite.waive_payment:
+                return _register_waived(payload, request, background, team_name, leader_email, emails, price, now)
+    api = request.app.state.payment_client
+    if api is None:
+        raise HTTPException(503, "payment provider is not configured")
 
     # Phase 1, no event lock: rate limit, settle the leader's existing unpaid registration with the
     # provider, and decide whether it is reused, blocked, or replaced. Network calls happen here only.
@@ -114,7 +153,8 @@ def create_registration(payload: RegistrationRequest, request: Request):
             session.commit()
             raise HTTPException(429, "too many registration attempts")
         session.commit()
-        ensure_window_open(current_event(session), "registration", now)
+        if not invited:
+            ensure_window_open(current_event(session), "registration", now)
         _raise_conflicts(session, team_name, leader_email, emails, now, replacing=None)
         pending = _leader_registration(session, leader_email, lock=True)
         replacing = None
@@ -150,7 +190,9 @@ def create_registration(payload: RegistrationRequest, request: Request):
     # Phase 2, under the event lock: re-check everything (state may have moved) and write atomically.
     with _session(request) as session:
         event = current_event(session, lock=True)
-        ensure_window_open(event, "registration", now)
+        invite = _live_invite(session, payload.invite_token, now, lock=True) if invited else None
+        if invite is None:
+            ensure_window_open(event, "registration", now)
         _raise_conflicts(session, team_name, leader_email, emails, now, replacing=replacing)
         pending = _leader_registration(session, leader_email, lock=True)
         if pending is not None:
@@ -181,11 +223,58 @@ def create_registration(payload: RegistrationRequest, request: Request):
             currency="INR", status="CREATED", purpose=payments.REGISTRATION, created_at=now,
         )
         session.add(order)
+        if invite is not None:
+            invite.used_at = invite.used_at or now
+            invite.registration_id = registration.id
         try:
             session.commit()
         except IntegrityError:
             raise HTTPException(409, "team name is already registered") from None
         return _checkout(order, registration, request)
+
+
+def _register_waived(payload: RegistrationRequest, request: Request, background: BackgroundTasks, team_name: str,
+                     leader_email: str, emails: list[str], price, now: datetime) -> dict:
+    """An invited team whose fee is waived is registered as paid straight away, with no checkout."""
+    leader = next(member for member in payload.members if member.role == "leader")
+    with _session(request) as session:
+        event = current_event(session, lock=True)
+        invite = _live_invite(session, payload.invite_token, now, lock=True)
+        _raise_conflicts(session, team_name, leader_email, emails, now, replacing=None)
+        pending = _leader_registration(session, leader_email, lock=True)
+        if pending is not None:
+            # The invite supersedes an unpaid attempt by the same leader.
+            pending.status = "ABANDONED"
+            for stale in session.scalars(select(PaymentOrder).where(PaymentOrder.registration_id == pending.id, PaymentOrder.status == "CREATED")):
+                stale.status = "CANCELLED"
+            session.flush()
+        registration = Registration(
+            event_id=event.id, team_name=team_name, leader_email=leader_email, status="PAID", fee_waived=True,
+            quoted_amount_minor=0, effective_amount_minor=0, pricing_tier=price.tier,
+            category=registration_category(price.tier, leader.college).value,
+        )
+        session.add(registration)
+        session.flush()
+        session.add_all(
+            RegistrationMember(
+                registration_id=registration.id, role=member.role, full_name=member.full_name,
+                email_normalized=member.email.lower(), phone=member.phone, college=member.college,
+                is_acm_member=member.is_acm_member, acm_id=member.acm_id.upper() or None,
+                acm_review_status="PENDING" if member.is_acm_member else "NOT_APPLICABLE",
+            ) for member in payload.members
+        )
+        invite.used_at = now
+        invite.registration_id = registration.id
+        session.flush()
+        payments.activate_leader(session, registration)
+        audit(session, None, "Invited team registered", "registration", registration.id, team=team_name, fee_waived=True)
+        try:
+            session.commit()
+        except IntegrityError:
+            raise HTTPException(409, "team name is already registered") from None
+    request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+    _dispatch_email(request, background)
+    return {"status": "PAID", "fee_waived": True, "team_name": team_name}
 
 
 def _leader_registration(session: Session, leader_email: str, lock: bool = False) -> Registration | None:

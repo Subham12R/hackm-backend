@@ -131,12 +131,14 @@ def test_announcements_notify_only_after_publish_and_track_reads() -> None:
     unread = harness.client.get("/api/v1/participant/dashboard", headers=leader).json()["unread_announcements"]
     assert harness.client.post("/api/v1/participant/announcements/read", headers=leader, json={"ids": [announcement_id]}).status_code == 204
     assert harness.client.get("/api/v1/participant/dashboard", headers=leader).json()["unread_announcements"] == unread - 1
-    assert harness.client.delete(f"/api/v1/admin/announcements/{announcement_id}", headers=admin).status_code == 409
     # Re-publishing never emails twice.
     harness.client.post(f"/api/v1/admin/announcements/{announcement_id}/unpublish", headers=admin)
     count = len(harness.sink.messages)
     harness.client.post(f"/api/v1/admin/announcements/{announcement_id}/publish", headers=admin)
     assert len(harness.sink.messages) == count
+    # Published announcements can be deleted outright; read receipts go with them.
+    assert harness.client.delete(f"/api/v1/admin/announcements/{announcement_id}", headers=admin).status_code == 204
+    assert announcement_id not in {item["id"] for item in harness.client.get("/api/v1/participant/announcements", headers=leader).json()["items"]}
 
 
 def test_submission_links_are_validated_versioned_and_finalized_once() -> None:

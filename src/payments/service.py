@@ -138,7 +138,7 @@ def apply_provider_payment(session: Session, payment: dict) -> PaymentOutcome:
         order.status = "CAPTURED"
         attempt.status = "CAPTURED"
         registration.status = "PAID"
-        _activate_leader(session, registration)
+        activate_leader(session, registration)
     else:
         order.status = "CAPTURED"
         attempt.status = "CAPTURED"
@@ -188,7 +188,7 @@ def accept_reviewed_attempt(session: Session, attempt: PaymentAttempt, actor: Us
     attempt.status = "CAPTURED"
     attempt.review_reason = None
     registration.status = "PAID"
-    _activate_leader(session, registration)
+    activate_leader(session, registration)
     session.add(AuditLog(
         actor_user_id=actor.id, action="Accepted reviewed payment", target_type="registration",
         target_id=str(registration.id), metadata_json={"payment": attempt.provider_payment_id},
@@ -270,7 +270,7 @@ def reprice(session: Session, registration: Registration) -> None:
     members = registration_members(session, registration.id)
     price = effective_registration_price(members)
     leader = next((member for member in members if member.role == "leader"), None)
-    registration.effective_amount_minor = price.amount_paise
+    registration.effective_amount_minor = 0 if registration.fee_waived else price.amount_paise
     registration.category = registration_category(price.tier, leader.college if leader else "").value
 
 
@@ -356,16 +356,17 @@ def apply_refund_update(session: Session, entity: dict) -> bool:
     return True
 
 
-def _activate_leader(session: Session, registration: Registration) -> None:
+def activate_leader(session: Session, registration: Registration) -> None:
     user = session.scalar(select(User).where(User.email_normalized == registration.leader_email))
     participant_role = session.get(Role, RoleCode.PARTICIPANT)
-    amount_row = ("Amount paid", f"₹{registration.quoted_amount_minor // 100}")
+    amount_row = ("Entry fee", "Waived (invited team)") if registration.fee_waived else ("Amount paid", f"₹{registration.quoted_amount_minor // 100}")
+    confirmed = "Your team is registered" if registration.fee_waived else "Your payment is confirmed"
     if user is not None and user.status == UserStatus.ACTIVE:
         # Existing account (for example a staff member leading a team): grant access, no activation link.
         if participant_role not in user.roles:
             user.roles.append(participant_role)
-        queue_email(session, user.email_normalized, "Your HackMatrix payment is confirmed", action_email(
-            title="Your payment is confirmed",
+        queue_email(session, user.email_normalized, f"HackMatrix: {confirmed.lower()}", action_email(
+            title=confirmed,
             intro="Your team is registered. Sign in with your existing HackMatrix password.",
             rows=[("Account", user.email_normalized), amount_row, ("Event", "HackMatrix 26")],
             steps=["Open the sign-in page.", "Use your existing password.", "Open the participant dashboard."],
@@ -399,8 +400,8 @@ def _activate_leader(session: Session, registration: Registration) -> None:
     token = token_urlsafe(32)
     session.add(ActivationToken(user_id=user.id, token_hash=sha256(token.encode()).hexdigest(), expires_at=datetime.now(UTC) + timedelta(minutes=30)))
     queue_email(session, user.email_normalized, "Activate your HackMatrix account", action_email(
-        title="Your payment is confirmed",
-        intro="Your payment is confirmed. Activate the leader account within 30 minutes.",
+        title=confirmed,
+        intro=f"{confirmed}. Activate the leader account within 30 minutes.",
         rows=[("Account", user.email_normalized), amount_row, ("Event", "HackMatrix 26")],
         original_amount="₹400" if registration.quoted_amount_minor < 40000 else None,
         steps=["Press Activate account below.", "Choose a password.", "Sign in to the participant dashboard."],

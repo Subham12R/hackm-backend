@@ -21,6 +21,7 @@ from src.db.models.identity import User
 from src.db.models.registration import (
     Announcement,
     AnnouncementRead,
+    MemberCheckin,
     PaymentOrder,
     Registration,
     RegistrationMember,
@@ -125,6 +126,7 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 "adjustment": {"status": registration.adjustment_status, "amount_minor": registration.adjustment_amount_minor},
                 "members": [_member_payload(member) for member in members],
                 "submission": _submission_payload(submission),
+                "finals": _finals(session, registration, members),
                 "event": event_payload(event, now, stage),
                 "unread_announcements": int(unread or 0),
                 "team_editable": window_state(event, "registration", now) != "CLOSED",
@@ -345,6 +347,25 @@ def _verification(registration: Registration, members: list[RegistrationMember])
         "state": state,
         "details": registration.details_review_status,
         "acm": [{"member_id": str(member.id), "status": member.acm_review_status} for member in acm],
+    }
+
+
+def _finals(session: Session, registration: Registration, members: list[RegistrationMember]) -> dict:
+    """Finals selection and venue check-in; members are only listed once the team is accepted."""
+    if registration.finals_status != "ACCEPTED":
+        return {"status": registration.finals_status, "checked_in": 0, "member_count": len(members), "members": []}
+    arrived = {
+        row.member_id: row.checked_in_at
+        for row in session.scalars(select(MemberCheckin).where(MemberCheckin.registration_id == registration.id))
+    }
+    return {
+        "status": registration.finals_status,
+        "checked_in": len(arrived),
+        "member_count": len(members),
+        "members": [
+            {"member_id": str(member.id), "checked_in_at": arrived[member.id].isoformat() if member.id in arrived else None}
+            for member in members
+        ],
     }
 
 
