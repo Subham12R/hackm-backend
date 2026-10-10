@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from src.auth.policies import RoleCode
@@ -137,7 +138,11 @@ def test_only_finals_teams_check_in_with_analytics() -> None:
     assert after["timeline"] and after["timeline"][-1]["total"] == after["summary"]["checked_in"]
     mine = next(item for item in after["teams"] if item["team_name"] == accepted_name)
     assert mine["checked_in"] == 1 and next(m for m in mine["members"] if m["id"] == leader["id"])["checked_in_by"]
-    # The team sees its own arrivals on the participant dashboard.
+    # Decisions stay private until released; then the team sees its own arrivals on the dashboard.
+    assert harness.client.get("/api/v1/participant/dashboard", headers=finalist).json()["finals"]["status"] == "PENDING"
+    released = harness.client.post("/api/v1/admin/finals/release", headers=reviewer,
+                                   json={"rsvp_closes_at": (datetime.now(UTC) + timedelta(days=2)).isoformat()})
+    assert released.status_code == 200, released.text
     finals = harness.client.get("/api/v1/participant/dashboard", headers=finalist).json()["finals"]
     assert finals["status"] == "ACCEPTED" and finals["checked_in"] == 1 and finals["member_count"] == 2
     assert {m["member_id"]: bool(m["checked_in_at"]) for m in finals["members"]} == {m["id"]: m["id"] == leader["id"] for m in mine["members"]}

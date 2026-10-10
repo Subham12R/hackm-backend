@@ -489,6 +489,9 @@ def _team_rows(session, registrations: list[Registration], timezone: str) -> lis
                 "status": registration.finals_status,
                 "decided_at": registration.finals_decided_at.isoformat() if registration.finals_decided_at else None,
                 "decided_by": reviewers.get(registration.finals_decided_by_user_id),
+                "notified_status": registration.finals_notified_status,
+                "rsvp_status": registration.rsvp_status,
+                "rsvp_at": registration.rsvp_at.isoformat() if registration.rsvp_at else None,
             },
             "tracks": choices.get(registration.id, []),
         })

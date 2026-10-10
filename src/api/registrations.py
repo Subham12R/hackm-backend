@@ -13,11 +13,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.audit import audit
+from src.auth.owner import is_owner_email
 from src.auth.rate_limits import is_limited
 from src.cache import ADMIN_AGGREGATES
 from src.communications.outbox import dispatch_pending
 from src.db.models.registration import PaymentOrder, PaymentWebhookEvent, Registration, RegistrationMember, TeamInvite
 from src.db.session import create_db_engine
+from src.events import finals
 from src.events.service import ACTIVE_EVENT_ID, current_event
 from src.events.windows import ensure_window_open
 from src.payments import service as payments
@@ -114,6 +116,43 @@ def invite_details(request: Request, token: str = Query(min_length=1, max_length
         return {"email": invite.email_normalized, "waive_payment": invite.waive_payment, "expires_at": invite.expires_at.isoformat()}
 
 
+class RsvpRequest(BaseModel):
+    token: Annotated[str, StringConstraints(min_length=1, max_length=100)]
+    answer: Literal["CONFIRMED", "DECLINED"]
+
+
+def _rsvp_registration(session: Session, token: str, lock: bool = False) -> Registration:
+    query = select(Registration).where(Registration.rsvp_token_hash == finals.rsvp_digest(token), Registration.event_id == ACTIVE_EVENT_ID)
+    registration = session.scalar(query.with_for_update() if lock else query)
+    if registration is None:
+        raise HTTPException(404, "this RSVP link is not valid")
+    return registration
+
+
+@router.get("/api/v1/registrations/rsvp")
+def rsvp_details(request: Request, token: str = Query(min_length=1, max_length=100)):
+    with _session(request) as session:
+        registration = _rsvp_registration(session, token)
+        return finals.rsvp_payload(registration, current_event(session), datetime.now(UTC))
+
+
+@router.post("/api/v1/registrations/rsvp")
+def rsvp(payload: RsvpRequest, request: Request):
+    """Answered from the acceptance email's link; the link itself is the team leader's credential."""
+    with _session(request) as session:
+        now = datetime.now(UTC)
+        if is_limited(session, f"rsvp:{finals.rsvp_digest(payload.token)}", now, 20, timedelta(hours=1)):
+            session.commit()
+            raise HTTPException(429, "too many attempts")
+        registration = _rsvp_registration(session, payload.token, lock=True)
+        event = current_event(session)
+        finals.apply_rsvp(session, registration, event, payload.answer, now)
+        audit(session, None, "Team RSVP", "registration", registration.id, answer=payload.answer, via="email link")
+        session.commit()
+        request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+        return finals.rsvp_payload(registration, event, now)
+
+
 def _member_key(member) -> tuple:
     return (member.role, member.full_name, member.email.lower() if hasattr(member, "email") else member.email_normalized,
             member.phone, member.college, member.is_acm_member, (member.acm_id or "").upper())
@@ -129,6 +168,8 @@ def create_registration(payload: RegistrationRequest, request: Request, backgrou
     emails = [member.email.lower() for member in payload.members]
     if len(set(emails)) != len(emails):
         raise HTTPException(422, "each member needs a different email")
+    if any(is_owner_email(email) for email in emails):
+        raise HTTPException(422, "this email address is reserved")
     price = calculate_registration_price([member.model_dump() for member in payload.members])
     leader_email = leaders[0].email.lower()
     team_name = " ".join(payload.team_name.split())

@@ -25,6 +25,8 @@ class Event(Base):
     submission_opens_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     submission_closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     challenge_release_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Accepted finalists confirm attendance (RSVP) until this time; set when decisions are released.
+    finals_rsvp_closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
 
@@ -95,6 +97,13 @@ class Registration(Base):
     finals_status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
     finals_decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finals_decided_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    # Decisions stay private until released by email; this is the decision the team was last told.
+    finals_notified_status: Mapped[str | None] = mapped_column(String(20))
+    finals_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # RSVP for accepted finalists: PENDING -> CONFIRMED or DECLINED (from the email link or dashboard).
+    rsvp_status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    rsvp_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rsvp_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
     # Invited teams whose entry fee the organisers waived; they never owe a balance.
     fee_waived: Mapped[bool] = mapped_column(Boolean, default=False)
 

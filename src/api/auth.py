@@ -14,6 +14,7 @@ from src.auth.security import decode_access_token, hash_password, verify_passwor
 from src.communications.templates import action_email
 from src.auth.service import AuthenticationError, authenticate, issue_tokens, rotate_tokens
 from src.auth.sessions import InvalidRefreshSession
+from src.auth.owner import is_owner, is_owner_email
 from src.auth.policies import RoleCode
 from src.auth.rate_limits import is_blocked, is_limited
 from src.communications.outbox import dispatch_pending, queue_email
@@ -166,6 +167,8 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
     @router.post("/admin/invites", status_code=201)
     def create_invite(payload: AdminInviteRequest, request: Request, background: BackgroundTasks, authorization: str = Header()):
         admin = super_admin(request, authorization)
+        if is_owner_email(payload.email):
+            raise HTTPException(409, "the owner account cannot be invited")
         with Session(create_db_engine(request.app.state.database_url)) as session:
             token = token_urlsafe(32)
             invite = AdminInvite(email_normalized=payload.email.strip().lower(), role_code=payload.role, token_hash=sha256(token.encode()).hexdigest(), expires_at=datetime.now(UTC) + timedelta(days=7), invited_by_user_id=admin.id)
@@ -189,6 +192,9 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
             invite = session.scalar(select(AdminInvite).where(AdminInvite.token_hash == sha256(payload.token.encode()).hexdigest()))
             now = datetime.now(UTC)
             if invite is None or invite.accepted_at is not None or invite.revoked_at is not None or invite.expires_at <= now:
+                raise HTTPException(400, "invalid invite token")
+            if is_owner_email(invite.email_normalized):
+                # Defence in depth: an invite must never reset the owner's password or roles.
                 raise HTTPException(400, "invalid invite token")
             user = session.scalar(select(User).options(selectinload(User.roles)).where(User.email_normalized == invite.email_normalized))
             role = session.get(Role, invite.role_code)
@@ -288,4 +294,5 @@ def auth_router(private_key: Ed25519PrivateKey, public_key: Ed25519PublicKey, em
 
 
 def user_payload(user: User) -> dict[str, object]:
-    return {"id": str(user.id), "email": user.email_normalized, "display_name": user.display_name, "roles": [str(role.code) for role in user.roles]}
+    return {"id": str(user.id), "email": user.email_normalized, "display_name": user.display_name, "roles": [str(role.code) for role in user.roles],
+            "is_owner": is_owner(user)}

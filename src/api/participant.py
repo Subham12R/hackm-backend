@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -30,6 +30,7 @@ from src.db.models.registration import (
 from src.db.models.judging import ResultRow
 from src.db.models.stage import Stage, Track
 from src.events import stages as stage_rules
+from src.events import finals as finals_rules
 from src.events.service import current_event, event_payload
 from src.judging.service import criteria as judging_criteria
 from src.judging.service import released_snapshots
@@ -90,6 +91,10 @@ class ReadRequest(BaseModel):
     all: bool = False
 
 
+class RsvpAnswer(BaseModel):
+    answer: Literal["CONFIRMED", "DECLINED"]
+
+
 def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
     router = APIRouter(prefix="/api/v1/participant", tags=["participant"])
 
@@ -126,7 +131,7 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 "adjustment": {"status": registration.adjustment_status, "amount_minor": registration.adjustment_amount_minor},
                 "members": [_member_payload(member) for member in members],
                 "submission": _submission_payload(submission),
-                "finals": _finals(session, registration, members),
+                "finals": _finals(session, registration, members, event),
                 "event": event_payload(event, now, stage),
                 "unread_announcements": int(unread or 0),
                 "team_editable": window_state(event, "registration", now) != "CLOSED",
@@ -173,6 +178,18 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 "member": _member_payload(member),
                 "adjustment": {"status": registration.adjustment_status, "amount_minor": registration.adjustment_amount_minor},
             }
+
+    @router.post("/rsvp")
+    def rsvp(payload: RsvpAnswer, request: Request, authorization: str = Header()):
+        session, user, registration = leader_registration(request, authorization, lock=True)
+        with session:
+            event = current_event(session)
+            finals_rules.apply_rsvp(session, registration, event, payload.answer, datetime.now(UTC))
+            audit(session, user, "Team RSVP", "registration", registration.id, answer=payload.answer, via="dashboard")
+            session.commit()
+            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            members = payments.registration_members(session, registration.id)
+            return _finals(session, registration, members, event)
 
     @router.get("/stages")
     def list_stages(request: Request, authorization: str = Header()):
@@ -350,16 +367,22 @@ def _verification(registration: Registration, members: list[RegistrationMember])
     }
 
 
-def _finals(session: Session, registration: Registration, members: list[RegistrationMember]) -> dict:
-    """Finals selection and venue check-in; members are only listed once the team is accepted."""
-    if registration.finals_status != "ACCEPTED":
-        return {"status": registration.finals_status, "checked_in": 0, "member_count": len(members), "members": []}
+def _finals(session: Session, registration: Registration, members: list[RegistrationMember], event) -> dict:
+    """The released finals decision, RSVP and venue check-in. Unreleased decisions read as PENDING."""
+    released = finals_rules.released_status(registration)
+    rsvp = finals_rules.rsvp_payload(registration, event, datetime.now(UTC))
+    if released != "ACCEPTED" or registration.finals_status != "ACCEPTED":
+        return {"status": "PENDING" if released == "ACCEPTED" else released, "checked_in": 0, "member_count": len(members), "members": [],
+                "rsvp_status": None, "rsvp_closes_at": None, "rsvp_open": False}
     arrived = {
         row.member_id: row.checked_in_at
         for row in session.scalars(select(MemberCheckin).where(MemberCheckin.registration_id == registration.id))
     }
     return {
-        "status": registration.finals_status,
+        "status": "ACCEPTED",
+        "rsvp_status": registration.rsvp_status,
+        "rsvp_closes_at": rsvp["closes_at"],
+        "rsvp_open": rsvp["open"],
         "checked_in": len(arrived),
         "member_count": len(members),
         "members": [
