@@ -81,6 +81,12 @@ class AwardRequest(BaseModel):
     track_id: UUID | None = None
 
 
+class TeamTrackRequest(BaseModel):
+    # The track to lock the team into; leave empty to unlock so the team can pick again.
+    track_id: UUID | None = None
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=300)]
+
+
 def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
     router = APIRouter(prefix="/api/v1/admin", tags=["admin-stages"])
 
@@ -208,6 +214,45 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
             session.delete(track)
             session.commit()
 
+    @router.put("/stages/{stage_id}/teams/{registration_id}/track")
+    def set_team_track(stage_id: UUID, registration_id: UUID, payload: TeamTrackRequest, request: Request, authorization: str = Header()):
+        """Change or unlock a team's locked problem statement (admins only; teams cannot undo their choice)."""
+        session, actor = authenticated_user(request, authorization, public_key, EVENT_CONTROL_ROLES)
+        with session:
+            stage = stage_rules.get_stage(session, stage_id, current_event(session).id)
+            registration = session.get(Registration, registration_id, with_for_update=True)
+            if registration is None or registration.event_id != stage.event_id or not stage_rules.is_eligible(stage, registration):
+                raise HTTPException(404, "team not found in this event")
+            track = None
+            if payload.track_id is not None:
+                track = session.get(Track, payload.track_id)
+                if track is None or track.stage_id != stage.id:
+                    raise HTTPException(422, "choose one of this event's problem statements")
+            submission = session.scalar(
+                select(Submission).where(Submission.registration_id == registration.id, Submission.stage_id == stage.id).with_for_update()
+            )
+            current = submission.track_id if submission else None
+            if current == payload.track_id:
+                return _team_track_payload(submission, track)
+            if submission is not None and session.scalar(select(SubmissionAward.id).where(
+                SubmissionAward.submission_id == submission.id, SubmissionAward.track_id.is_not(None)).limit(1)) is not None:
+                raise HTTPException(409, "this team has a placing in its track; remove it first")
+            now = datetime.now(UTC)
+            if submission is None:
+                submission = Submission(registration_id=registration.id, stage_id=stage.id, status="DRAFT", version=0)
+                session.add(submission)
+            previous = session.get(Track, current) if current else None
+            submission.track_id = track.id if track else None
+            submission.track_locked_at = now if track else None
+            # Bumping the version makes an open participant tab reload before it can save over the change.
+            submission.version = (submission.version or 0) + 1
+            submission.updated_at = now
+            audit(session, actor, "Changed team track" if track else "Unlocked team track", "submission", team_code(registration.id),
+                  event=stage.name, previous=previous.title if previous else None, track=track.title if track else None, reason=payload.reason)
+            session.commit()
+            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            return _team_track_payload(submission, track)
+
     @router.post("/submissions/{submission_id}/awards", status_code=201)
     def add_award(submission_id: UUID, payload: AwardRequest, request: Request, authorization: str = Header()):
         session, actor = authenticated_user(request, authorization, public_key, ASSIGNMENT_ROLES)
@@ -263,6 +308,13 @@ def _track(session, track_id: UUID, lock: bool = False) -> Track:
         raise HTTPException(404, "problem statement not found")
     stage_rules.get_stage(session, track.stage_id, current_event(session).id)
     return track
+
+
+def _team_track_payload(submission: Submission | None, track: Track | None) -> dict:
+    return {
+        "track": {"id": str(track.id), "title": track.title} if track else None,
+        "track_locked_at": submission.track_locked_at.isoformat() if submission and submission.track_locked_at else None,
+    }
 
 
 def _ensure_order(stage: Stage) -> None:
