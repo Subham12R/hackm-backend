@@ -112,18 +112,37 @@ class S3Storage:
 
 
 def storage_from_env() -> S3Storage | None:
-    """None when no bucket is configured; gallery uploads then answer 503 and the rest of the API runs."""
+    """None when no bucket is configured or its settings are unusable; gallery uploads then
+    answer 503 and the rest of the API runs. Storage settings never stop the API from starting."""
+    log = logging.getLogger(__name__)
     if bucket := os.getenv("R2_BUCKET"):
         account_id = os.getenv("R2_ACCOUNT_ID")
         endpoint = os.getenv("R2_ENDPOINT_URL") or (account_id and f"https://{account_id}.r2.cloudflarestorage.com")
         public_url = os.getenv("R2_PUBLIC_URL")
-        if not endpoint or not public_url:
-            # Incomplete settings switch the gallery off rather than keeping the whole API from starting.
-            logging.getLogger(__name__).warning("gallery storage off: R2_BUCKET needs R2_ACCOUNT_ID (or R2_ENDPOINT_URL) and R2_PUBLIC_URL")
+        key_id = os.getenv("R2_ACCESS_KEY_ID") or os.getenv("AWS_ACCESS_KEY_ID")
+        secret = os.getenv("R2_SECRET_ACCESS_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
+        missing = [
+            name
+            for name, value in (
+                ("R2_ACCOUNT_ID", endpoint),
+                ("R2_PUBLIC_URL", public_url),
+                ("R2_ACCESS_KEY_ID", key_id),
+                ("R2_SECRET_ACCESS_KEY", secret),
+            )
+            if not value
+        ]
+        if missing:
+            log.warning("gallery storage off: R2_BUCKET is set but %s is missing", ", ".join(missing))
             return None
-        return S3Storage(bucket, "auto", public_url, endpoint, os.getenv("R2_ACCESS_KEY_ID"), os.getenv("R2_SECRET_ACCESS_KEY"))
-    bucket = os.getenv("S3_BUCKET")
-    if not bucket:
+        settings = (bucket, "auto", public_url, endpoint, key_id, secret)
+    else:
+        bucket = os.getenv("S3_BUCKET")
+        if not bucket:
+            return None
+        region = os.getenv("S3_REGION") or os.getenv("AWS_REGION") or "ap-south-1"
+        settings = (bucket, region, os.getenv("S3_PUBLIC_BASE_URL"), os.getenv("S3_ENDPOINT_URL"))
+    try:
+        return S3Storage(*settings)
+    except Exception:
+        log.warning("gallery storage off: could not set up the storage client", exc_info=True)
         return None
-    region = os.getenv("S3_REGION") or os.getenv("AWS_REGION") or "ap-south-1"
-    return S3Storage(bucket, region, os.getenv("S3_PUBLIC_BASE_URL"), os.getenv("S3_ENDPOINT_URL"))

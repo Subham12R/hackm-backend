@@ -191,3 +191,9 @@ def test_r2_settings_build_an_r2_store(monkeypatch):
 
     monkeypatch.delenv("R2_PUBLIC_URL")
     assert storage_from_env() is None
+
+    # A missing access key id (the production crash) switches the gallery off instead of failing startup.
+    monkeypatch.setenv("R2_PUBLIC_URL", "https://pub-1.r2.dev")
+    monkeypatch.delenv("R2_ACCESS_KEY_ID")
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    assert storage_from_env() is None
