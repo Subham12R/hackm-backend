@@ -9,6 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints, model_validator
 from sqlalchemy import func, select
 
+from src import realtime
 from src.api.deps import authenticated_user
 from src.audit import audit
 from src.auth.policies import ADMIN_READ_ROLES, EVENT_CONTROL_ROLES
@@ -46,6 +47,7 @@ class EventUpdate(BaseModel):
     registration_opens_at: datetime | None = None
     registration_closes_at: datetime | None = None
     registration_enabled: bool | None = None
+    registration_mode: Literal["OPEN", "CLOSED", "SCHEDULED"] | None = None
     submission_opens_at: datetime | None = None
     submission_closes_at: datetime | None = None
     challenge_release_at: datetime | None = None
@@ -100,9 +102,15 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
             event = current_event(session, lock=True)
             stage = stage_rules.default_stage(session, event.id, lock=True)
             changes = {}
-            for field in payload.model_fields_set:
+            fields = set(payload.model_fields_set)
+            # The old on/off switch maps onto the mode: off is CLOSED, on goes back to following the dates.
+            if "registration_enabled" in fields and payload.registration_enabled is not None and payload.registration_mode is None:
+                payload.registration_mode = "SCHEDULED" if payload.registration_enabled else "CLOSED"
+                fields.add("registration_mode")
+            fields.discard("registration_enabled")
+            for field in fields:
                 value = getattr(payload, field)
-                if field in ("name", "timezone", "registration_enabled") and value is None:
+                if field in ("name", "timezone", "registration_mode") and value is None:
                     continue
                 target, attribute = (stage, STAGE_FIELDS[field]) if field in STAGE_FIELDS else (event, field)
                 if getattr(target, attribute) != value:
@@ -111,6 +119,10 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
             for target, opens, closes in ((event, "registration_opens_at", "registration_closes_at"), (stage, "submission_opens_at", "submission_closes_at"), (event, "starts_at", "ends_at")):
                 if getattr(target, opens) and getattr(target, closes) and getattr(target, opens) >= getattr(target, closes):
                     raise HTTPException(422, f"{opens.replace('_', ' ')} must be before {closes.replace('_', ' ')}")
+            event.registration_enabled = event.registration_mode != "CLOSED"
+            if "registration_mode" in changes:
+                # The audit log keeps the older field too, so past and present entries read alike.
+                changes["registration_enabled"] = event.registration_enabled
             if changes:
                 event.updated_at = datetime.now(UTC)
                 event.updated_by_user_id = actor.id
@@ -208,11 +220,14 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
                     queue_email(session, email, f"HackMatrix: {item.title}", action_email(
                         title=item.title, intro=item.body, rows=[], steps=[], action="Open dashboard",
                         url=f"{app_url()}/dashboard", note="You are receiving this because your team is registered for HackMatrix.", eyebrow="Announcement",
-                    ))
+                    ), sender="announcements")
                 recipients = len(set(leaders))
                 item.emailed_at = item.published_at
             audit(session, actor, "Published announcement", "announcement", item.id, title=item.title, emailed=recipients)
             session.commit()
+            realtime.notify(request, realtime.EVERYONE, realtime.message(
+                "announcement", item.title, item.body[:280], item.level, id=str(item.id), refresh=["announcements"],
+            ))
             background.add_task(dispatch_pending, request.app.state.database_url, request.app.state.email_sender, 500)
             return _announcement_payload(item, {actor.id: actor.display_name}, {}, 0)
 

@@ -1,6 +1,11 @@
+import math
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
+
+# What each tier must net after Razorpay's cut.
+TIER_BASE_PAISE = {"adamas-acm": 20000, "acm": 30000, "standard": 40000}
 
 
 @dataclass(frozen=True)
@@ -52,3 +57,26 @@ def registration_category(tier: str, leader_college: str) -> RegistrationCategor
     if is_adamas(leader_college):
         return RegistrationCategory.ADAMAS_ONLY
     return RegistrationCategory.OUTER_COLLEGE
+
+
+def processing_fee_ppm() -> int:
+    """Razorpay's cut in parts per million of the amount charged: fee % plus GST on that fee.
+
+    Defaults to 2% + 18% GST = 2.36% (domestic cards, UPI, netbanking). RAZORPAY_FEE_PERCENT=0 turns
+    the pass-through off, for example if Razorpay's own "customer fee bearer" mode is enabled.
+    """
+    fee = float(os.getenv("RAZORPAY_FEE_PERCENT", "2"))
+    gst = float(os.getenv("RAZORPAY_FEE_GST_PERCENT", "18"))
+    ppm = round(fee / 100 * (1 + gst / 100) * 1_000_000)
+    return min(max(ppm, 0), 500_000)
+
+
+def with_processing_fee(base_paise: int, ppm: int) -> int:
+    """The amount to charge so that, after Razorpay keeps `ppm` of it, at least `base_paise` arrives.
+
+    Rounded up to a whole rupee: ₹200 -> ₹205, ₹300 -> ₹308, ₹400 -> ₹410 at 2.36%.
+    """
+    if base_paise <= 0 or ppm <= 0:
+        return base_paise
+    gross = math.ceil(base_paise * 1_000_000 / (1_000_000 - ppm))
+    return math.ceil(gross / 100) * 100

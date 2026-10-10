@@ -4,16 +4,19 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
+from src import realtime
 from src.api.deps import authenticated_user
 from src.audit import audit
 from src.auth.policies import ADMIN_READ_ROLES, CHECKIN_ROLES, TEAM_REVIEW_ROLES
 from src.cache import ADMIN_AGGREGATES
 from src.db.models.identity import User
 from src.db.models.registration import MemberCheckin, Registration, RegistrationMember
+from src.communications.outbox import dispatch_pending
+from src.events import finals
 from src.events.service import ACTIVE_EVENT_ID, current_event
 from src.operations import team_code
 
@@ -26,6 +29,11 @@ class FinalsRequest(BaseModel):
 
 class CheckinRequest(BaseModel):
     checked_in: bool
+
+
+class ReleaseRequest(BaseModel):
+    # Required the first time accepted teams are released; later releases may keep the existing one.
+    rsvp_closes_at: datetime | None = None
 
 
 def admin_checkin_router(public_key: Ed25519PublicKey) -> APIRouter:
@@ -45,6 +53,9 @@ def admin_checkin_router(public_key: Ed25519PublicKey) -> APIRouter:
             ):
                 raise HTTPException(409, "undo this team's check-ins before removing it from the finals")
             if registration.finals_status != payload.status:
+                if registration.finals_status == "ACCEPTED":
+                    # A withdrawn place also withdraws its RSVP; the team is told at the next release.
+                    registration.rsvp_status, registration.rsvp_at, registration.rsvp_token_hash = "PENDING", None, None
                 registration.finals_status = payload.status
                 registration.finals_decided_at = datetime.now(UTC)
                 registration.finals_decided_by_user_id = actor.id
@@ -53,6 +64,55 @@ def admin_checkin_router(public_key: Ed25519PublicKey) -> APIRouter:
                 request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             decider = session.get(User, registration.finals_decided_by_user_id) if registration.finals_decided_by_user_id else None
             return {"finals": finals_payload(registration, decider.display_name if decider else None)}
+
+    @router.get("/finals")
+    def finals_overview(request: Request, authorization: str = Header()):
+        session, _user = authenticated_user(request, authorization, public_key, ADMIN_READ_ROLES)
+        with session:
+            event = current_event(session)
+            rows = session.execute(
+                select(Registration.finals_status, Registration.finals_notified_status, Registration.rsvp_status)
+                .where(Registration.event_id == ACTIVE_EVENT_ID, Registration.status == "PAID")
+            ).all()
+            unreleased = {"ACCEPTED": 0, "DECLINED": 0}
+            rsvp = {"PENDING": 0, "CONFIRMED": 0, "DECLINED": 0}
+            decided = {"PENDING": 0, "ACCEPTED": 0, "DECLINED": 0}
+            for status, notified, answer in rows:
+                decided[status] = decided.get(status, 0) + 1
+                if status in unreleased and notified != status:
+                    unreleased[status] += 1
+                if status == "ACCEPTED" and notified == "ACCEPTED":
+                    rsvp[answer] = rsvp.get(answer, 0) + 1
+            closes = event.finals_rsvp_closes_at
+            return {"decided": decided, "unreleased": unreleased, "rsvp": rsvp, "rsvp_closes_at": closes.isoformat() if closes else None}
+
+    @router.post("/finals/release")
+    def release_decisions(payload: ReleaseRequest, request: Request, background: BackgroundTasks, authorization: str = Header()):
+        session, actor = authenticated_user(request, authorization, public_key, TEAM_REVIEW_ROLES)
+        with session:
+            event = current_event(session, lock=True)
+            now = datetime.now(UTC)
+            if payload.rsvp_closes_at is not None:
+                if payload.rsvp_closes_at.tzinfo is None or payload.rsvp_closes_at <= now:
+                    raise HTTPException(422, "the RSVP deadline must be a future time with a timezone")
+                event.finals_rsvp_closes_at = payload.rsvp_closes_at
+            pending = finals.unreleased(session, event.id)
+            if not pending:
+                raise HTTPException(409, "every decision has already been emailed")
+            if any(team.finals_status == "ACCEPTED" for team in pending) and (event.finals_rsvp_closes_at is None or event.finals_rsvp_closes_at <= now):
+                raise HTTPException(422, "set an RSVP deadline before releasing acceptances")
+            counts, released = finals.release(session, event, now)
+            audit(session, actor, "Released finals decisions", "event", event.id, accepted=counts["ACCEPTED"], rejected=counts["DECLINED"], emails=counts["emails"])
+            session.commit()
+            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            for registration_id, decision in released:
+                realtime.notify(request, realtime.team_channel(registration_id), realtime.message(
+                    "finals", "You're in the offline finals!" if decision == "ACCEPTED" else "Your finals decision is in",
+                    "Confirm your attendance on the dashboard." if decision == "ACCEPTED" else "Open the dashboard to read it.",
+                    "IMPORTANT" if decision == "ACCEPTED" else "INFO", refresh=["dashboard", "stages"],
+                ))
+            background.add_task(dispatch_pending, request.app.state.database_url, request.app.state.email_sender, counts["emails"] + 10)
+            return {"released": {"ACCEPTED": counts["ACCEPTED"], "DECLINED": counts["DECLINED"]}, "emails": counts["emails"]}
 
     @router.get("/checkins")
     def list_checkins(
@@ -107,6 +167,9 @@ def admin_checkin_router(public_key: Ed25519PublicKey) -> APIRouter:
                 audit(session, actor, "Participant checked in" if payload.checked_in else "Check-in undone", "registration_member", member.id,
                       team=registration.team_name, name=member.full_name)
                 session.commit()
+                if payload.checked_in:
+                    realtime.notify(request, realtime.team_channel(registration.id), realtime.message(
+                        "checkin", f"{member.full_name} checked in", "Welcome to HackMatrix!", refresh=["dashboard"]))
             row = session.get(MemberCheckin, member.id)
             return {"member_id": str(member.id), "checked_in_at": row.checked_in_at.isoformat() if row else None}
 
@@ -125,6 +188,9 @@ def admin_checkin_router(public_key: Ed25519PublicKey) -> APIRouter:
                 audit(session, actor, "Team checked in" if payload.checked_in else "Team check-in undone", "registration", registration.id,
                       team=registration.team_name, members=changed)
                 session.commit()
+                if payload.checked_in:
+                    realtime.notify(request, realtime.team_channel(registration.id), realtime.message(
+                        "checkin", "Your team is checked in", "Welcome to HackMatrix!", refresh=["dashboard"]))
             return {"registration_id": str(registration.id), "changed": changed}
 
     return router
@@ -135,6 +201,9 @@ def finals_payload(registration: Registration, decided_by: str | None) -> dict:
         "status": registration.finals_status,
         "decided_at": registration.finals_decided_at.isoformat() if registration.finals_decided_at else None,
         "decided_by": decided_by,
+        "notified_status": registration.finals_notified_status,
+        "rsvp_status": registration.rsvp_status,
+        "rsvp_at": registration.rsvp_at.isoformat() if registration.rsvp_at else None,
     }
 
 

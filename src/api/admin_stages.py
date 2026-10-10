@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from src.api.admin_event import Resource
+from src import realtime
 from src.api.deps import authenticated_user
 from src.audit import audit
 from src.auth.policies import ADMIN_READ_ROLES, ASSIGNMENT_ROLES, EVENT_CONTROL_ROLES
@@ -250,6 +251,10 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
             audit(session, actor, "Changed team track" if track else "Unlocked team track", "submission", team_code(registration.id),
                   event=stage.name, previous=previous.title if previous else None, track=track.title if track else None, reason=payload.reason)
             session.commit()
+            realtime.notify(request, realtime.team_channel(registration.id), realtime.message(
+                "track", f"Organisers changed your problem statement to {track.title}" if track else "Your problem statement was unlocked",
+                f"{stage.name}: reload before you keep editing." if track else f"{stage.name}: choose one again on the dashboard.",
+                "IMPORTANT", refresh=["stages", "dashboard"]))
             request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             return _team_track_payload(submission, track)
 

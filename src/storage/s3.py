@@ -17,6 +17,10 @@ MAX_PHOTO_BYTES = 15 * 1024 * 1024
 UPLOAD_TTL_SECONDS = 10 * 60
 CACHE_CONTROL = "public, max-age=31536000, immutable"
 PHOTO_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/avif": "avif"}
+EMAIL_PREFIX = "email/"
+# Email clients render GIF, JPEG and PNG reliably; WebP/AVIF are left out on purpose.
+EMAIL_IMAGE_TYPES = {"image/gif": "gif", "image/jpeg": "jpg", "image/png": "png"}
+MAX_EMAIL_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 @dataclass(frozen=True)

@@ -27,7 +27,7 @@ from src.db.models.registration import (
     Registration,
     RegistrationMember,
 )
-from src.registrations.pricing import effective_registration_price, registration_category
+from src.registrations.pricing import TIER_BASE_PAISE, effective_registration_price, registration_category, with_processing_fee
 
 logger = logging.getLogger(__name__)
 
@@ -270,7 +270,8 @@ def reprice(session: Session, registration: Registration) -> None:
     members = registration_members(session, registration.id)
     price = effective_registration_price(members)
     leader = next((member for member in members if member.role == "leader"), None)
-    registration.effective_amount_minor = 0 if registration.fee_waived else price.amount_paise
+    # The fee rate the team registered with also applies to any balance it owes later.
+    registration.effective_amount_minor = 0 if registration.fee_waived else with_processing_fee(price.amount_paise, registration.processing_fee_ppm or 0)
     registration.category = registration_category(price.tier, leader.college if leader else "").value
 
 
@@ -403,7 +404,8 @@ def activate_leader(session: Session, registration: Registration) -> None:
         title=confirmed,
         intro=f"{confirmed}. Activate the leader account within 30 minutes.",
         rows=[("Account", user.email_normalized), amount_row, ("Event", "HackMatrix 26")],
-        original_amount="₹400" if registration.quoted_amount_minor < 40000 else None,
+        original_amount=f"₹{with_processing_fee(TIER_BASE_PAISE['standard'], registration.processing_fee_ppm or 0) // 100}"
+        if registration.pricing_tier != "standard" and not registration.fee_waived else None,
         steps=["Press Activate account below.", "Choose a password.", "Sign in to the participant dashboard."],
         action="Activate account",
         url=f"{app_url()}/activate?token={token}",

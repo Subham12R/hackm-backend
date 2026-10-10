@@ -1,16 +1,23 @@
+import asyncio
+import contextlib
+import json
+import os
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 from uuid import UUID
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from src import realtime
 from src.api.deps import authenticated_user
 from src.api.registrations import _phone
 from src.audit import audit
@@ -30,10 +37,11 @@ from src.db.models.registration import (
 from src.db.models.judging import ResultRow
 from src.db.models.stage import Stage, Track
 from src.events import stages as stage_rules
+from src.events import finals as finals_rules
 from src.events.service import current_event, event_payload
 from src.judging.service import criteria as judging_criteria
 from src.judging.service import released_snapshots
-from src.events.windows import window_state
+from src.events.windows import team_edits_close_at, team_edits_open
 from src.operations import team_code
 from src.payments import service as payments
 from src.payments.providers.razorpay import create_order
@@ -90,6 +98,10 @@ class ReadRequest(BaseModel):
     all: bool = False
 
 
+class RsvpAnswer(BaseModel):
+    answer: Literal["CONFIRMED", "DECLINED"]
+
+
 def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
     router = APIRouter(prefix="/api/v1/participant", tags=["participant"])
 
@@ -102,6 +114,44 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
             session.close()
             raise HTTPException(404, "registration not found")
         return session, user, registration
+
+    @router.get("/notifications/stream")
+    async def notification_stream(request: Request, authorization: str = Header()):
+        """Server-Sent Events: announcements for everyone plus this team's own updates, as they happen."""
+        def resolve() -> str:
+            session, _user, registration = leader_registration(request, authorization)
+            with session:
+                return str(registration.id)
+
+        registration_id = await run_in_threadpool(resolve)
+        channels = [realtime.EVERYONE, realtime.team_channel(registration_id)]
+        notifier = request.app.state.notifier
+        heartbeat = float(os.getenv("NOTIFY_HEARTBEAT_SECONDS", "20"))
+
+        async def events():
+            # Reconnect after 5 s; "ready" tells the dashboard to refetch whatever it missed while offline.
+            yield "retry: 5000\nevent: ready\ndata: {}\n\n"
+            stream = notifier.subscribe(channels).__aiter__()
+            pending = asyncio.ensure_future(stream.__anext__())
+            try:
+                while True:
+                    done, _ = await asyncio.wait({pending}, timeout=heartbeat)
+                    if await request.is_disconnected():
+                        break
+                    if not done:
+                        # Comments keep proxies (nginx, Cloudflare) from closing an idle connection.
+                        yield ": ping\n\n"
+                        continue
+                    yield f"event: notification\ndata: {json.dumps(pending.result())}\n\n"
+                    pending = asyncio.ensure_future(stream.__anext__())
+            finally:
+                pending.cancel()
+                with contextlib.suppress(BaseException):
+                    await pending
+                await stream.aclose()
+
+        return StreamingResponse(events(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
 
     @router.get("/dashboard")
     def dashboard(request: Request, authorization: str = Header()):
@@ -126,10 +176,11 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 "adjustment": {"status": registration.adjustment_status, "amount_minor": registration.adjustment_amount_minor},
                 "members": [_member_payload(member) for member in members],
                 "submission": _submission_payload(submission),
-                "finals": _finals(session, registration, members),
+                "finals": _finals(session, registration, members, event),
                 "event": event_payload(event, now, stage),
                 "unread_announcements": int(unread or 0),
-                "team_editable": window_state(event, "registration", now) != "CLOSED",
+                "team_editable": team_edits_open(event, now),
+                "team_edits_close_at": _iso_or_none(team_edits_close_at(event)),
             }
 
     @router.patch("/team/members/{member_id}")
@@ -137,8 +188,8 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
         session, user, registration = leader_registration(request, authorization, lock=True)
         with session:
             event = current_event(session)
-            if window_state(event, "registration", datetime.now(UTC)) == "CLOSED":
-                raise HTTPException(403, "team details are locked after registration closes")
+            if not team_edits_open(event, datetime.now(UTC)):
+                raise HTTPException(403, "team details are locked now; contact support for corrections")
             member = session.get(RegistrationMember, member_id)
             if member is None or member.registration_id != registration.id:
                 raise HTTPException(404, "member not found")
@@ -173,6 +224,18 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 "member": _member_payload(member),
                 "adjustment": {"status": registration.adjustment_status, "amount_minor": registration.adjustment_amount_minor},
             }
+
+    @router.post("/rsvp")
+    def rsvp(payload: RsvpAnswer, request: Request, authorization: str = Header()):
+        session, user, registration = leader_registration(request, authorization, lock=True)
+        with session:
+            event = current_event(session)
+            finals_rules.apply_rsvp(session, registration, event, payload.answer, datetime.now(UTC))
+            audit(session, user, "Team RSVP", "registration", registration.id, answer=payload.answer, via="dashboard")
+            session.commit()
+            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            members = payments.registration_members(session, registration.id)
+            return _finals(session, registration, members, event)
 
     @router.get("/stages")
     def list_stages(request: Request, authorization: str = Header()):
@@ -333,6 +396,10 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
     return router
 
 
+def _iso_or_none(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
 def _verification(registration: Registration, members: list[RegistrationMember]) -> dict:
     acm = [member for member in members if member.is_acm_member]
     if registration.adjustment_status == "REQUIRED":
@@ -350,16 +417,22 @@ def _verification(registration: Registration, members: list[RegistrationMember])
     }
 
 
-def _finals(session: Session, registration: Registration, members: list[RegistrationMember]) -> dict:
-    """Finals selection and venue check-in; members are only listed once the team is accepted."""
-    if registration.finals_status != "ACCEPTED":
-        return {"status": registration.finals_status, "checked_in": 0, "member_count": len(members), "members": []}
+def _finals(session: Session, registration: Registration, members: list[RegistrationMember], event) -> dict:
+    """The released finals decision, RSVP and venue check-in. Unreleased decisions read as PENDING."""
+    released = finals_rules.released_status(registration)
+    rsvp = finals_rules.rsvp_payload(registration, event, datetime.now(UTC))
+    if released != "ACCEPTED" or registration.finals_status != "ACCEPTED":
+        return {"status": "PENDING" if released == "ACCEPTED" else released, "checked_in": 0, "member_count": len(members), "members": [],
+                "rsvp_status": None, "rsvp_closes_at": None, "rsvp_open": False}
     arrived = {
         row.member_id: row.checked_in_at
         for row in session.scalars(select(MemberCheckin).where(MemberCheckin.registration_id == registration.id))
     }
     return {
-        "status": registration.finals_status,
+        "status": "ACCEPTED",
+        "rsvp_status": registration.rsvp_status,
+        "rsvp_closes_at": rsvp["closes_at"],
+        "rsvp_open": rsvp["open"],
         "checked_in": len(arrived),
         "member_count": len(members),
         "members": [
@@ -388,7 +461,7 @@ def _unique_code(session: Session) -> str:
 def _team_stage(session: Session, registration: Registration, stage_id: UUID) -> Stage:
     stage = session.get(Stage, stage_id)
     # Unpublished events and events the team is not part of look the same as missing ones.
-    if stage is None or stage.event_id != registration.event_id or not stage.published or not stage_rules.is_eligible(stage, registration):
+    if stage is None or stage.event_id != registration.event_id or not stage.published or not stage_rules.is_eligible(stage, registration, released_only=True):
         raise HTTPException(404, "event not found")
     return stage
 

@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from src.api.deps import authenticated_user
 from src.audit import audit
+from src.auth.owner import is_owner_email
 from src.auth.policies import ADMIN_PORTAL_ROLES, ADMIN_READ_ROLES, SUPPORT_ROLES, RoleCode
 from src.cache import ADMIN_AGGREGATES
 from src.communications.outbox import dispatch_pending, queue_email
@@ -110,7 +111,7 @@ def admin_ops_router(public_key: Ed25519PublicKey) -> APIRouter:
                 queue_email(session, message.email, f"Re: {message.subject}", action_email(
                     title=f"Re: {message.subject}", intro=payload.body, rows=[], steps=[], action="Visit HackMatrix",
                     url="https://hackmatrix.codes", note=f"In reply to your message from {message.created_at:%d %b %Y}.", eyebrow="From the organisers",
-                ))
+                ), sender="support")
                 if message.status == "NEW":
                     message.status = "OPEN"
             audit(session, actor, "Replied to contact" if payload.kind == "REPLY" else "Noted contact", "contact", message.id)
@@ -172,6 +173,10 @@ def admin_ops_router(public_key: Ed25519PublicKey) -> APIRouter:
                 raise HTTPException(404, "user not found")
             if user.id == actor.id:
                 raise HTTPException(409, "you cannot change your own access")
+            if is_owner_email(user.email_normalized):
+                audit(session, actor, "Blocked change to owner account", "user", user.email_normalized)
+                session.commit()
+                raise HTTPException(403, "the owner account cannot be changed by other staff")
             changes = {}
             if payload.roles is not None:
                 requested = set(payload.roles)
@@ -301,5 +306,6 @@ def _staff_payload(user: User) -> dict:
     return {
         "id": str(user.id), "email": user.email_normalized, "display_name": user.display_name, "status": user.status.value,
         "roles": sorted(role.code.value for role in user.roles if role.code != RoleCode.PARTICIPANT),
+        "owner": is_owner_email(user.email_normalized),
     }
 

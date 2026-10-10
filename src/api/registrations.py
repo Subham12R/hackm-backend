@@ -13,16 +13,24 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.audit import audit
+from src.auth.owner import is_owner_email
 from src.auth.rate_limits import is_limited
 from src.cache import ADMIN_AGGREGATES
 from src.communications.outbox import dispatch_pending
 from src.db.models.registration import PaymentOrder, PaymentWebhookEvent, Registration, RegistrationMember, TeamInvite
 from src.db.session import create_db_engine
+from src.events import finals
 from src.events.service import ACTIVE_EVENT_ID, current_event
 from src.events.windows import ensure_window_open
 from src.payments import service as payments
 from src.payments.providers.razorpay import create_order, verify_webhook_signature
-from src.registrations.pricing import calculate_registration_price, registration_category
+from src.registrations.pricing import (
+    TIER_BASE_PAISE,
+    calculate_registration_price,
+    processing_fee_ppm,
+    registration_category,
+    with_processing_fee,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -82,8 +90,11 @@ def _session(request: Request):
 
 
 def _checkout(order: PaymentOrder, registration: Registration, request: Request) -> dict:
+    base = min(TIER_BASE_PAISE.get(registration.pricing_tier, order.amount_minor), order.amount_minor)
     return {"order_id": order.provider_order_id, "amount": order.amount_minor, "currency": order.currency,
-            "key_id": request.app.state.razorpay_key_id, "team_name": registration.team_name}
+            "key_id": request.app.state.razorpay_key_id, "team_name": registration.team_name,
+            # Breakdown for the pay page: the entry fee and the payment processing charge on top.
+            "base_amount": base, "fee_amount": order.amount_minor - base, "tier": registration.pricing_tier}
 
 
 def _dispatch_email(request: Request, background: BackgroundTasks) -> None:
@@ -114,6 +125,43 @@ def invite_details(request: Request, token: str = Query(min_length=1, max_length
         return {"email": invite.email_normalized, "waive_payment": invite.waive_payment, "expires_at": invite.expires_at.isoformat()}
 
 
+class RsvpRequest(BaseModel):
+    token: Annotated[str, StringConstraints(min_length=1, max_length=100)]
+    answer: Literal["CONFIRMED", "DECLINED"]
+
+
+def _rsvp_registration(session: Session, token: str, lock: bool = False) -> Registration:
+    query = select(Registration).where(Registration.rsvp_token_hash == finals.rsvp_digest(token), Registration.event_id == ACTIVE_EVENT_ID)
+    registration = session.scalar(query.with_for_update() if lock else query)
+    if registration is None:
+        raise HTTPException(404, "this RSVP link is not valid")
+    return registration
+
+
+@router.get("/api/v1/registrations/rsvp")
+def rsvp_details(request: Request, token: str = Query(min_length=1, max_length=100)):
+    with _session(request) as session:
+        registration = _rsvp_registration(session, token)
+        return finals.rsvp_payload(registration, current_event(session), datetime.now(UTC))
+
+
+@router.post("/api/v1/registrations/rsvp")
+def rsvp(payload: RsvpRequest, request: Request):
+    """Answered from the acceptance email's link; the link itself is the team leader's credential."""
+    with _session(request) as session:
+        now = datetime.now(UTC)
+        if is_limited(session, f"rsvp:{finals.rsvp_digest(payload.token)}", now, 20, timedelta(hours=1)):
+            session.commit()
+            raise HTTPException(429, "too many attempts")
+        registration = _rsvp_registration(session, payload.token, lock=True)
+        event = current_event(session)
+        finals.apply_rsvp(session, registration, event, payload.answer, now)
+        audit(session, None, "Team RSVP", "registration", registration.id, answer=payload.answer, via="email link")
+        session.commit()
+        request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+        return finals.rsvp_payload(registration, event, now)
+
+
 def _member_key(member) -> tuple:
     return (member.role, member.full_name, member.email.lower() if hasattr(member, "email") else member.email_normalized,
             member.phone, member.college, member.is_acm_member, (member.acm_id or "").upper())
@@ -129,7 +177,11 @@ def create_registration(payload: RegistrationRequest, request: Request, backgrou
     emails = [member.email.lower() for member in payload.members]
     if len(set(emails)) != len(emails):
         raise HTTPException(422, "each member needs a different email")
+    if any(is_owner_email(email) for email in emails):
+        raise HTTPException(422, "this email address is reserved")
     price = calculate_registration_price([member.model_dump() for member in payload.members])
+    fee_ppm = processing_fee_ppm()
+    charge = with_processing_fee(price.amount_paise, fee_ppm)
     leader_email = leaders[0].email.lower()
     team_name = " ".join(payload.team_name.split())
     now = datetime.now(UTC)
@@ -168,7 +220,7 @@ def create_registration(payload: RegistrationRequest, request: Request, backgrou
                     raise HTTPException(409, "this leader email already has a paid registration")
             saved = payments.registration_members(session, pending.id)
             if (order is not None and order.status == "CREATED" and pending.team_name == team_name
-                    and order.amount_minor == price.amount_paise
+                    and order.amount_minor == charge
                     and {_member_key(m) for m in payload.members} == {_member_key(m) for m in saved}):
                 session.commit()
                 return _checkout(order, pending, request)
@@ -182,7 +234,7 @@ def create_registration(payload: RegistrationRequest, request: Request, backgrou
     # simply never paid; a payment on it would be recorded for review, never lost.
     registration_id = uuid4()
     try:
-        created = create_order(api, price.amount_paise, str(registration_id), {"purpose": payments.REGISTRATION})
+        created = create_order(api, charge, str(registration_id), {"purpose": payments.REGISTRATION})
     except Exception:
         logger.exception("razorpay order creation failed")
         raise HTTPException(502, "payment provider is unavailable") from None
@@ -205,7 +257,7 @@ def create_registration(payload: RegistrationRequest, request: Request, backgrou
             session.flush()
         registration = Registration(
             id=registration_id, event_id=event.id, team_name=team_name, leader_email=leader_email, status="PAYMENT_PENDING",
-            quoted_amount_minor=price.amount_paise, effective_amount_minor=price.amount_paise, pricing_tier=price.tier,
+            quoted_amount_minor=charge, effective_amount_minor=charge, pricing_tier=price.tier, processing_fee_ppm=fee_ppm,
             category=registration_category(price.tier, leaders[0].college).value,
         )
         session.add(registration)
@@ -219,7 +271,7 @@ def create_registration(payload: RegistrationRequest, request: Request, backgrou
             ) for member in payload.members
         )
         order = PaymentOrder(
-            registration_id=registration.id, provider_order_id=created["id"], amount_minor=price.amount_paise,
+            registration_id=registration.id, provider_order_id=created["id"], amount_minor=charge,
             currency="INR", status="CREATED", purpose=payments.REGISTRATION, created_at=now,
         )
         session.add(order)

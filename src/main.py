@@ -17,6 +17,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.api.auth import auth_router
 from src.api.admin import admin_router
 from src.api.admin_checkin import admin_checkin_router
+from src.api.admin_emails import admin_emails_router
+from src.api.admin_owner import admin_owner_router
 from src.api.admin_stages import admin_stages_router
 from src.api.admin_event import admin_event_router
 from src.api.admin_gallery import admin_gallery_router
@@ -37,6 +39,7 @@ from src.communications.outbox import dispatch_pending
 from src.api.middleware import request_id_middleware
 from src.config import Settings, decode_pem_env
 from src.db.session import create_db_engine
+from src.realtime import notifier_from_env
 from src.storage.s3 import Storage, storage_from_env
 
 
@@ -49,6 +52,7 @@ def create_app(
     razorpay_webhook_secret: str | None = None,
     razorpay_key_id: str | None = None,
     storage: Storage | None = None,
+    notifier=None,
 ) -> FastAPI:
     settings = Settings(
         database_url=database_url
@@ -67,6 +71,7 @@ def create_app(
 
     app = FastAPI(title="HackMatrix API", lifespan=lifespan)
     app.state.cache = cache_from_env()
+    app.state.notifier = notifier or notifier_from_env()
     app.state.storage = storage or storage_from_env()
     app.state.database_url = settings.database_url
     app.state.razorpay_key_id = razorpay_key_id or os.getenv("RAZORPAY_KEY_ID")
@@ -77,8 +82,8 @@ def create_app(
         else None
     )
     app.state.email_sender = email_sender or (
-        ResendEmailSender(os.environ["RESEND_API_KEY"], os.environ["EMAIL_FROM"])
-        if os.getenv("RESEND_API_KEY") and os.getenv("EMAIL_FROM")
+        ResendEmailSender(os.environ["RESEND_API_KEY"])
+        if os.getenv("RESEND_API_KEY")
         else LocalEmailSink()
     )
     app.include_router(registration_router)
@@ -127,6 +132,8 @@ def create_app(
         app.include_router(admin_ops_router(public_key))
         app.include_router(admin_gallery_router(public_key))
         app.include_router(admin_invites_router(public_key))
+        app.include_router(admin_emails_router(public_key))
+        app.include_router(admin_owner_router(public_key))
         app.include_router(admin_checkin_router(public_key))
         app.include_router(admin_stages_router(public_key))
         app.include_router(judge_router(public_key))

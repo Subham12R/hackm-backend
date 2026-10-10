@@ -43,7 +43,10 @@ Required environment values live in `.env` and are never committed:
 - `NEON_DATABASE_URL` or `DATABASE_URL`
 - `JWT_PRIVATE_KEY_PEM` and `JWT_PUBLIC_KEY_PEM`
 - `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET`
-- `RESEND_API_KEY` and `EMAIL_FROM` for live email
+- `RESEND_API_KEY` for live email (senders below)
+- `RAZORPAY_FEE_PERCENT` (default `2`) and `RAZORPAY_FEE_GST_PERCENT` (default `18`): Razorpay's cut, added on top of the tier price so each tier nets ₹400 / ₹300 / ₹200 (charged ₹410 / ₹308 / ₹205). Set the percent to `0` to stop passing it on.
+- `OWNER_EMAIL` (optional, default `admin@hackmatrix.codes`): the protected owner account (the login)
+- `OWNER_INBOX` (optional, default `rikk4335@gmail.com`): where mail for the owner account is delivered (flush codes, security alerts, password resets); all other mail is unaffected
 - `PARTICIPANT_APP_URL` for activation and reset links
 
 Apply migrations:
@@ -121,6 +124,40 @@ Admin, prefix `/api/v1/admin`, admin role required:
 Teams register and pay once; each event ("stage" in the code) has its own submission window, problem statements, submissions, judging rounds and winners. Migration `0012_stages` moves the existing schedule, challenge, submissions and rounds into a published "Main round". The event-level submission times and `/admin/challenge` now act on the first event.
 
 Public, prefix `/api/v1/public`: `GET /event`, `GET /leaderboard`, `GET /gallery`, `POST /contact`.
+
+## Live notifications
+
+Participant dashboards hold one Server-Sent Events connection (`GET /api/v1/participant/notifications/stream`). Endpoints
+publish after they commit: announcements and released results go to every team; finals decisions, check-ins, organiser
+track changes and reopened submissions go to that team only. The dashboard shows each one as a toast and refetches.
+
+- `REDIS_URL` carries messages between API workers and containers (Redis pub/sub on `hm:notify:*`). Without it delivery
+  is in-process, which is only correct with a single worker.
+- `NOTIFY_HEARTBEAT_SECONDS` (default 20) keeps idle connections open through nginx and Cloudflare.
+- Both nginx configs have a dedicated `location` for the stream with buffering off and a one-hour read timeout.
+
+## Email senders
+
+Every email goes out from one of three mailboxes on `hackmatrix.codes`:
+
+| Sender | Used for | Reply-To |
+|---|---|---|
+| `noreply@` | Activation, payments, password resets, invites, finals decisions, owner security codes | `support@` |
+| `support@` | Replies to contact-form messages | itself |
+| `announcements@` | Published announcements, and staff emails by default (the Email page can pick any sender) | `support@` |
+
+Only `RESEND_API_KEY` is required: verifying the domain in Resend covers all three addresses. Optional overrides take a full
+`Name <address>` value: `EMAIL_FROM_NOREPLY` (`EMAIL_FROM` still works as its old name), `EMAIL_FROM_SUPPORT`,
+`EMAIL_FROM_ANNOUNCEMENTS`, or `EMAIL_DOMAIN` to move all three to another domain.
+
+DNS (Cloudflare) for `hackmatrix.codes`, all records DNS-only:
+
+1. Resend → Domains → add `hackmatrix.codes` and create the records it lists (DKIM `resend._domainkey` TXT, and the `send`
+   subdomain's SPF TXT and MX). Wait for "Verified".
+2. `_dmarc` TXT: `v=DMARC1; p=none; rua=mailto:support@hackmatrix.codes` (tighten to `p=quarantine` once reports look clean).
+3. Email Routing → enable it, then forward `support@` and `announcements@` to the inbox the team reads. It adds the root MX
+   and SPF records itself; they do not clash with Resend, which sends from the `send` subdomain. Leave `noreply@` unrouted
+   (or route it to a drop rule); its Reply-To already points people at `support@`.
 
 ## Photo gallery storage
 

@@ -88,6 +88,13 @@ def test_finalists_move_on_to_the_next_event_after_the_online_round(stages_clean
     renamed = harness.client.patch(f"/api/v1/admin/stages/{draft['id']}", headers=admin, json={"name": "Side Quest", "description": "Bonus"})
     assert renamed.status_code == 200 and renamed.json()["name"] == "Side Quest"
 
+    # The finals stay hidden until the decision is emailed, so an Accept click never leaks early.
+    early = harness.client.get("/api/v1/participant/stages", headers=finalist).json()
+    assert [stage["id"] for stage in early["stages"]] == [first_id]
+    with db() as session:
+        session.execute(update(Registration).where(Registration.team_name == finalist_payload["team_name"]).values(finals_notified_status="ACCEPTED"))
+        session.commit()
+
     # A finalist sees both events and lands on the finals; everyone else only sees the online round.
     listed = harness.client.get("/api/v1/participant/stages", headers=finalist).json()
     assert [stage["id"] for stage in listed["stages"]] == [first_id, finals["id"]]
