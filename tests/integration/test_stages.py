@@ -301,3 +301,33 @@ def test_upgrade_moves_the_challenge_submissions_and_rounds_into_a_main_round(sc
     with engine.connect() as connection:
         assert connection.execute(text("SELECT project_name FROM submissions WHERE id = :id"), {"id": submission}).scalar() == "Signal"
     engine.dispose()
+
+
+def test_closed_events_can_be_deleted_with_their_data(stages_cleanup) -> None:
+    harness = Harness()
+    admin = harness.login(staff(RoleCode.EVENT_ADMIN), "admin")
+    coordinator = harness.login(staff(RoleCode.EVALUATION_ADMIN), "admin")
+    _payload, leader = harness.paid_team()
+    side = _finals(harness, admin, stages_cleanup, name=f"Side quest {uuid4().hex[:4]}", eligibility="ALL_PAID")
+    url = f"/api/v1/participant/stages/{side['id']}/submission"
+    assert harness.client.put(url, headers=leader, json=_project()).status_code == 200
+    assert harness.client.post(f"{url}/finalize", headers=leader).status_code == 200
+    round_ = harness.client.post("/api/v1/admin/rounds", headers=coordinator, json={"name": "Side judging", "stage_id": side["id"]}).json()
+
+    # While teams can still submit, hiding is the only option.
+    assert harness.client.delete(f"/api/v1/admin/stages/{side['id']}", headers=admin, params={"confirm": side["name"]}).status_code == 409
+    hidden = harness.client.patch(f"/api/v1/admin/stages/{side['id']}", headers=admin, json={"published": False})
+    assert hidden.status_code == 200 and hidden.json()["published"] is False
+
+    closed = harness.client.patch(f"/api/v1/admin/stages/{side['id']}", headers=admin, json={
+        "submission_closes_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+        "submission_opens_at": (datetime.now(UTC) - timedelta(hours=2)).isoformat()})
+    assert closed.status_code == 200
+    assert harness.client.delete(f"/api/v1/admin/stages/{side['id']}", headers=admin).status_code == 422
+    assert harness.client.delete(f"/api/v1/admin/stages/{side['id']}", headers=admin, params={"confirm": "wrong"}).status_code == 422
+    assert harness.client.delete(f"/api/v1/admin/stages/{side['id']}", headers=admin, params={"confirm": side["name"]}).status_code == 204
+
+    with db() as session:
+        assert session.get(Stage, side["id"]) is None
+        assert session.scalar(select(Submission.id).where(Submission.stage_id == side["id"])) is None
+        assert session.get(EvaluationRound, round_["id"]) is None

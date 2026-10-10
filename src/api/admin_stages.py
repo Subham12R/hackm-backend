@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -15,7 +15,7 @@ from src import realtime
 from src.api.deps import authenticated_user
 from src.audit import audit
 from src.auth.policies import ADMIN_READ_ROLES, ASSIGNMENT_ROLES, EVENT_CONTROL_ROLES
-from src.cache import ADMIN_AGGREGATES, PUBLIC_EVENT
+from src.cache import ADMIN_AGGREGATES, PUBLIC_EVENT, PUBLIC_LEADERBOARD
 from src.db.models.judging import EvaluationRound
 from src.db.models.registration import Registration, Submission
 from src.db.models.stage import Stage, SubmissionAward, Track
@@ -156,21 +156,30 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
             return _stage_payload(session, stage, datetime.now(UTC))
 
     @router.delete("/stages/{stage_id}", status_code=204)
-    def delete_stage(stage_id: UUID, request: Request, authorization: str = Header()):
+    def delete_stage(stage_id: UUID, request: Request, authorization: str = Header(), confirm: str = Query("", max_length=200)):
+        """An empty event can go at any time. One with submissions or judging can go once its submissions
+        have closed, with everything in it, and only when the request repeats the event's name."""
         session, actor = authenticated_user(request, authorization, public_key, EVENT_CONTROL_ROLES)
         with session:
             event = current_event(session, lock=True)
             stage = stage_rules.get_stage(session, stage_id, event.id, lock=True)
             if len(stage_rules.stages(session, event.id)) == 1:
                 raise HTTPException(409, "the hackathon needs at least one event")
-            if session.scalar(select(Submission.id).where(Submission.stage_id == stage.id).limit(1)) is not None:
-                raise HTTPException(409, "teams have submissions in this event; unpublish it instead")
-            if session.scalar(select(EvaluationRound.id).where(EvaluationRound.stage_id == stage.id).limit(1)) is not None:
-                raise HTTPException(409, "this event has judging rounds; unpublish it instead")
-            audit(session, actor, "Deleted event stage", "stage", stage.id, name=stage.name)
+            submissions = list(session.scalars(select(Submission).where(Submission.stage_id == stage.id)))
+            rounds = list(session.scalars(select(EvaluationRound).where(EvaluationRound.stage_id == stage.id)))
+            if submissions or rounds:
+                if stage_rules.submission_state(stage, datetime.now(UTC)) != "CLOSED":
+                    raise HTTPException(409, "teams are still working in this event; hide it, or delete it once submissions have closed")
+                if confirm.strip() != stage.name:
+                    raise HTTPException(422, "type the event's name to delete it with its submissions and results")
+            # Rounds take their rubric, assignments, scorecards and results with them; submissions their placings.
+            for row in [*rounds, *submissions]:
+                session.delete(row)
+            session.flush()
+            audit(session, actor, "Deleted event stage", "stage", stage.id, name=stage.name, submissions=len(submissions), rounds=len(rounds))
             session.delete(stage)
             session.commit()
-            request.app.state.cache.invalidate(PUBLIC_EVENT, ADMIN_AGGREGATES)
+            request.app.state.cache.invalidate(PUBLIC_EVENT, ADMIN_AGGREGATES, PUBLIC_LEADERBOARD)
 
     @router.post("/stages/{stage_id}/tracks", status_code=201)
     def create_track(stage_id: UUID, payload: TrackRequest, request: Request, authorization: str = Header()):
