@@ -17,6 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.api.auth import auth_router
 from src.api.admin import admin_router
 from src.api.admin_checkin import admin_checkin_router
+from src.api.admin_credentials import admin_credentials_router
 from src.api.admin_emails import admin_emails_router
 from src.api.admin_owner import admin_owner_router
 from src.api.admin_stages import admin_stages_router
@@ -36,6 +37,7 @@ from src.communications.providers.sink import LocalEmailSink
 from src.api.errors import ApiError
 from src.cache import cache_from_env
 from src.communications.outbox import dispatch_pending
+from src.credentials.service import render_pending
 from src.registrations.unpaid import sweep_unpaid
 from src.api.middleware import request_id_middleware
 from src.config import Settings, decode_pem_env
@@ -69,8 +71,11 @@ def create_app(
         sweeper = None
         if app.state.database_url and os.getenv("UNPAID_REGISTRATION_WORKER", "1") == "1":
             sweeper = asyncio.create_task(_unpaid_loop(app))
+        drawer = None
+        if app.state.database_url and os.getenv("CREDENTIAL_RENDER_WORKER", "1") == "1":
+            drawer = asyncio.create_task(_credential_loop(app))
         yield
-        for running in (task, sweeper):
+        for running in (task, sweeper, drawer):
             if running is not None:
                 running.cancel()
 
@@ -141,6 +146,7 @@ def create_app(
         app.include_router(admin_owner_router(public_key))
         app.include_router(admin_checkin_router(public_key))
         app.include_router(admin_stages_router(public_key))
+        app.include_router(admin_credentials_router(public_key))
         app.include_router(judge_router(public_key))
 
     return app
@@ -165,6 +171,16 @@ async def _unpaid_loop(app: FastAPI) -> None:
             await asyncio.to_thread(dispatch_pending, app.state.database_url, app.state.email_sender)
         except Exception:
             logging.getLogger(__name__).warning("unpaid registration sweep failed", exc_info=True)
+
+
+async def _credential_loop(app: FastAPI) -> None:
+    """Draw certificates whose request-time drawing was cut short (restart, storage hiccup)."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            await asyncio.to_thread(render_pending, app.state.database_url, app.state.storage)
+        except Exception:
+            logging.getLogger(__name__).warning("credential drawing pass failed", exc_info=True)
 
 
 app = create_app()

@@ -16,6 +16,7 @@ from src.api.deps import authenticated_user
 from src.audit import audit
 from src.auth.policies import ADMIN_READ_ROLES, ASSIGNMENT_ROLES, EVENT_CONTROL_ROLES
 from src.cache import ADMIN_AGGREGATES, PUBLIC_EVENT, PUBLIC_LEADERBOARD
+from src.db.models.credential import Credential
 from src.db.models.judging import EvaluationRound
 from src.db.models.registration import Registration, Submission
 from src.db.models.stage import Stage, SubmissionAward, Track
@@ -165,6 +166,8 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
             stage = stage_rules.get_stage(session, stage_id, event.id, lock=True)
             if len(stage_rules.stages(session, event.id)) == 1:
                 raise HTTPException(409, "the hackathon needs at least one event")
+            if session.scalar(select(Credential.id).where(Credential.stage_id == stage.id).limit(1)) is not None:
+                raise HTTPException(409, "certificates or badges were issued for this event; delete the drafts or revoke them first")
             submissions = list(session.scalars(select(Submission).where(Submission.stage_id == stage.id)))
             rounds = list(session.scalars(select(EvaluationRound).where(EvaluationRound.stage_id == stage.id)))
             if submissions or rounds:
@@ -345,4 +348,5 @@ def _stage_payload(session, stage: Stage, now: datetime) -> dict:
                        "released": stage_rules.statements_released(stage, now)},
         "tracks": [stage_rules.track_payload(track) for track in stage_rules.tracks(session, stage.id)],
         "updated_at": stage.updated_at.isoformat() if stage.updated_at else None,
+        "completed_at": stage.completed_at.isoformat() if stage.completed_at else None,
     }

@@ -38,6 +38,9 @@ class Stage(Base):
     submission_opens_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     submission_closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     statements_release_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set when an organiser marks the event completed; certificates for it can only be published after that.
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
