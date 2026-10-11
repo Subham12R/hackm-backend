@@ -146,9 +146,10 @@ def test_rejected_acm_claim_requires_a_balance_payment_before_final_submission()
     registration = _registration(payload["members"][0]["email"])
     with db() as session:
         acm_member = session.scalar(select(RegistrationMember).where(RegistrationMember.registration_id == registration.id, RegistrationMember.is_acm_member))
+    # The leader is from Adamas, so losing the ACM rate moves the team to the ₹300 Adamas tier.
     rejected = harness.client.post(f"/api/v1/admin/teams/{registration.id}/members/{acm_member.id}/acm-review", headers=admin, json={"status": "REJECTED"})
     assert rejected.status_code == 200, rejected.text
-    assert rejected.json()["adjustment"] == {"status": "REQUIRED", "amount_minor": 20000}
+    assert rejected.json()["adjustment"] == {"status": "REQUIRED", "amount_minor": 10000}
     assert any(subject == "HackMatrix registration: balance due" for _to, subject, _html in harness.sink.messages)
 
     dashboard = harness.client.get("/api/v1/participant/dashboard", headers=leader_headers).json()
@@ -158,10 +159,10 @@ def test_rejected_acm_claim_requires_a_balance_payment_before_final_submission()
     assert harness.client.post("/api/v1/participant/submission/finalize", headers=leader_headers).status_code == 409
 
     order = harness.client.post("/api/v1/participant/payment-adjustment/order", headers=leader_headers)
-    assert order.status_code == 200 and order.json()["amount"] == 20000
+    assert order.status_code == 200 and order.json()["amount"] == 10000
     again = harness.client.post("/api/v1/participant/payment-adjustment/order", headers=leader_headers)
     assert again.json()["order_id"] == order.json()["order_id"]
-    payment = harness.gateway.pay(order.json()["order_id"], 20000)
+    payment = harness.gateway.pay(order.json()["order_id"], 10000)
     assert harness.confirm(payment).json() == {"status": "paid", "purpose": "ADJUSTMENT"}
     after = harness.client.get("/api/v1/participant/dashboard", headers=leader_headers).json()
     assert after["adjustment"] == {"status": "SETTLED", "amount_minor": 0}
@@ -217,7 +218,7 @@ def test_resubmitting_an_acm_id_after_rejection_does_not_clear_the_balance() -> 
     harness.client.post(f"/api/v1/admin/teams/{registration.id}/members/{member_id}/acm-review", headers=admin, json={"status": "REJECTED"})
     edited = harness.client.patch(f"/api/v1/participant/team/members/{member_id}", headers=leader_headers, json={"acm_id": "ACM-NEW"})
     assert edited.json()["member"]["acm_review_status"] == "RECHECK"
-    assert edited.json()["adjustment"] == {"status": "REQUIRED", "amount_minor": 20000}
+    assert edited.json()["adjustment"] == {"status": "REQUIRED", "amount_minor": 10000}
     verified = harness.client.post(f"/api/v1/admin/teams/{registration.id}/members/{member_id}/acm-review", headers=admin, json={"status": "VERIFIED"})
     assert verified.json()["adjustment"] == {"status": "NONE", "amount_minor": 0}
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 # What each tier must net after Razorpay's cut.
-TIER_BASE_PAISE = {"adamas-acm": 20000, "acm": 30000, "standard": 40000}
+TIER_BASE_PAISE = {"adamas-acm": 20000, "acm": 30000, "adamas": 30000, "standard": 40000}
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,8 @@ def calculate_registration_price(participants: list[dict[str, object]]) -> Regis
         amount, tier = 200, "adamas-acm"
     elif any(person.get("is_acm_member") is True for person in participants):
         amount, tier = 300, "acm"
+    elif any(is_adamas(person.get("college")) for person in participants):
+        amount, tier = 300, "adamas"
     else:
         amount, tier = 400, "standard"
     return RegistrationPrice(amount, amount * 100, tier)
@@ -54,7 +56,7 @@ def registration_category(tier: str, leader_college: str) -> RegistrationCategor
         return RegistrationCategory.ADAMAS_ACM
     if tier == "acm":
         return RegistrationCategory.OUTER_ACM
-    if is_adamas(leader_college):
+    if tier == "adamas":
         return RegistrationCategory.ADAMAS_ONLY
     return RegistrationCategory.OUTER_COLLEGE
 
