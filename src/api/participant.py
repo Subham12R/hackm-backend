@@ -24,6 +24,8 @@ from src.audit import audit
 from src.auth.policies import RoleCode
 from src.cache import ADMIN_AGGREGATES
 from src.communications.outbox import dispatch_pending
+from src.credentials import service as credentials
+from src.db.models.credential import BadgeDefinition, CertificateType, Credential
 from src.db.models.identity import User
 from src.db.models.registration import (
     Announcement,
@@ -338,6 +340,31 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                     },
                 })
             return {"released": bool(rounds), "rounds": rounds}
+
+    @router.get("/credentials")
+    def team_credentials(request: Request, authorization: str = Header()):
+        """Published certificates and badges of every member of the leader's team; drafts never appear."""
+        session, _user, registration = leader_registration(request, authorization)
+        with session:
+            items = list(session.scalars(
+                select(Credential).where(Credential.registration_id == registration.id, Credential.status == "PUBLISHED")
+                .order_by(Credential.published_at, Credential.recipient_name)
+            ))
+            types = {item.id: item for item in session.scalars(select(CertificateType).where(
+                CertificateType.id.in_({credential.certificate_type_id for credential in items if credential.certificate_type_id})))}
+            badges = {item.id: item for item in session.scalars(select(BadgeDefinition).where(
+                BadgeDefinition.id.in_({credential.badge_definition_id for credential in items if credential.badge_definition_id})))}
+            storage = request.app.state.storage
+            return {"items": [
+                {
+                    **credentials.public_payload(credential, credentials.title_of(credential, types.get(credential.certificate_type_id),
+                                                                                   badges.get(credential.badge_definition_id)),
+                                                 badges.get(credential.badge_definition_id), storage),
+                    "member_id": str(credential.member_id) if credential.member_id else None,
+                    "stage_id": str(credential.stage_id) if credential.stage_id else None,
+                }
+                for credential in items
+            ]}
 
     @router.get("/challenge")
     def challenge(request: Request, authorization: str = Header()):

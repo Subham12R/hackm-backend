@@ -8,7 +8,10 @@ from sqlalchemy.orm import Session
 
 from src.auth.rate_limits import is_limited
 from src.cache import PUBLIC_GALLERY, PUBLIC_LEADERBOARD
+from src.credentials import service as credentials
+from src.credentials.codes import normalize as normalize_code
 from src.db.models.contact import ContactMessage
+from src.db.models.credential import BadgeDefinition, CertificateType, Credential
 from src.db.models.judging import ResultRow
 from src.db.models.media import GalleryPhoto
 from src.db.session import create_db_engine
@@ -82,6 +85,20 @@ def public_gallery(request: Request):
             }
 
         return request.app.state.cache.get_or_set(PUBLIC_GALLERY, "all", 300, produce)
+
+
+@router.get("/credentials/{code}")
+def public_credential(code: str, request: Request):
+    """Verify a certificate or badge by its code. Drafts do not exist here; revoked ones say so."""
+    if len(code) > 20:
+        raise HTTPException(404, "credential not found")
+    with _session(request) as session:
+        credential = session.scalar(select(Credential).where(Credential.code == normalize_code(code)))
+        if credential is None or credential.status == "DRAFT":
+            raise HTTPException(404, "credential not found")
+        certificate_type = session.get(CertificateType, credential.certificate_type_id) if credential.certificate_type_id else None
+        badge = session.get(BadgeDefinition, credential.badge_definition_id) if credential.badge_definition_id else None
+        return credentials.public_payload(credential, credentials.title_of(credential, certificate_type, badge), badge, request.app.state.storage)
 
 
 @router.post("/contact", status_code=202)

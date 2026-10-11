@@ -1,4 +1,4 @@
-"""S3 storage for gallery photos.
+"""S3 storage for gallery photos, email images and credentials.
 
 Browsers upload straight to the bucket with a presigned POST (AWS) or PUT (S3-compatible
 stores such as Cloudflare R2, which has no POST uploads), so photo bytes never pass
@@ -21,6 +21,12 @@ EMAIL_PREFIX = "email/"
 # Email clients render GIF, JPEG and PNG reliably; WebP/AVIF are left out on purpose.
 EMAIL_IMAGE_TYPES = {"image/gif": "gif", "image/jpeg": "jpg", "image/png": "png"}
 MAX_EMAIL_IMAGE_BYTES = 10 * 1024 * 1024
+# Certificate artwork and badge images (uploaded by staff), and the files the API renders from them.
+CREDENTIAL_TEMPLATE_PREFIX = "credentials/templates/"
+CREDENTIAL_BADGE_PREFIX = "credentials/badges/"
+CREDENTIAL_FILE_PREFIX = "credentials/files/"
+CREDENTIAL_IMAGE_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+MAX_CREDENTIAL_IMAGE_BYTES = 15 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,8 @@ class Storage(Protocol):
     def head(self, key: str) -> StoredObject | None: ...
     def delete(self, key: str) -> None: ...
     def public_url(self, key: str) -> str: ...
+    def get(self, key: str) -> bytes | None: ...
+    def put(self, key: str, data: bytes, content_type: str) -> None: ...
 
 
 class S3Storage:
@@ -113,6 +121,19 @@ class S3Storage:
 
     def public_url(self, key: str) -> str:
         return f"{self._public_base}/{key}"
+
+    def get(self, key: str) -> bytes | None:
+        from botocore.exceptions import ClientError
+
+        try:
+            return self._client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+                return None
+            raise
+
+    def put(self, key: str, data: bytes, content_type: str) -> None:
+        self._client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=content_type, CacheControl=CACHE_CONTROL)
 
 
 def storage_from_env() -> S3Storage | None:
