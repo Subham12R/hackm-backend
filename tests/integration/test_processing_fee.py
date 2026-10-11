@@ -49,13 +49,13 @@ def test_new_teams_pay_the_fee_and_older_teams_keep_their_price(monkeypatch) -> 
     leader = harness.activate_leader(payload["members"][0]["email"])
     assert harness.client.get("/api/v1/participant/dashboard", headers=leader).json()["amount_minor"] == 20500
 
-    # A rejected ACM claim moves the team to the ₹400 tier; the balance keeps the fee so the total still nets ₹400.
+    # A rejected ACM claim moves this Adamas team to the ₹300 tier; the balance keeps the fee so the total still nets ₹300.
     registration, member = _acm_member(payload["team_name"])
     rejected = harness.client.post(f"/api/v1/admin/teams/{registration.id}/members/{member.id}/acm-review", headers=admin, json={"status": "REJECTED"})
-    assert rejected.json()["adjustment"] == {"status": "REQUIRED", "amount_minor": 41000 - 20500}
-    assert razorpay_net(20500) + razorpay_net(41000 - 20500) >= 40000
+    assert rejected.json()["adjustment"] == {"status": "REQUIRED", "amount_minor": 30800 - 20500}
+    assert razorpay_net(20500) + razorpay_net(30800 - 20500) >= 30000
 
     old_registration, old_member = _acm_member(old_payload["team_name"])
     old_rejected = harness.client.post(f"/api/v1/admin/teams/{old_registration.id}/members/{old_member.id}/acm-review", headers=admin, json={"status": "REJECTED"})
-    assert old_rejected.json()["adjustment"] == {"status": "REQUIRED", "amount_minor": 20000}
+    assert old_rejected.json()["adjustment"] == {"status": "REQUIRED", "amount_minor": 10000}
     assert harness.client.get("/api/v1/participant/dashboard", headers=old_leader).json()["amount_minor"] == 20000
