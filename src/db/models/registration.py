@@ -89,6 +89,8 @@ class Registration(Base):
     details_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     details_reviewed_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    # Set when the "finish your payment" reminder is queued; the registration lapses an hour later.
+    payment_reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     category: Mapped[str | None] = mapped_column(String(40), index=True)
     # Price after ACM review; quoted_amount_minor stays the immutable checkout quote.
     effective_amount_minor: Mapped[int | None] = mapped_column(Integer)

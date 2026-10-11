@@ -36,6 +36,7 @@ from src.communications.providers.sink import LocalEmailSink
 from src.api.errors import ApiError
 from src.cache import cache_from_env
 from src.communications.outbox import dispatch_pending
+from src.registrations.unpaid import sweep_unpaid
 from src.api.middleware import request_id_middleware
 from src.config import Settings, decode_pem_env
 from src.db.session import create_db_engine
@@ -65,9 +66,13 @@ def create_app(
         task = None
         if app.state.database_url and os.getenv("EMAIL_OUTBOX_WORKER", "1") == "1":
             task = asyncio.create_task(_outbox_loop(app))
+        sweeper = None
+        if app.state.database_url and os.getenv("UNPAID_REGISTRATION_WORKER", "1") == "1":
+            sweeper = asyncio.create_task(_unpaid_loop(app))
         yield
-        if task is not None:
-            task.cancel()
+        for running in (task, sweeper):
+            if running is not None:
+                running.cancel()
 
     app = FastAPI(title="HackMatrix API", lifespan=lifespan)
     app.state.cache = cache_from_env()
@@ -149,6 +154,17 @@ async def _outbox_loop(app: FastAPI) -> None:
             await asyncio.to_thread(dispatch_pending, app.state.database_url, app.state.email_sender)
         except Exception:
             logging.getLogger(__name__).warning("outbox retry pass failed", exc_info=True)
+
+
+async def _unpaid_loop(app: FastAPI) -> None:
+    """Remind unpaid registrations after an hour and lapse them an hour after the reminder."""
+    while True:
+        await asyncio.sleep(300)
+        try:
+            await asyncio.to_thread(sweep_unpaid, app.state.database_url, app.state.payment_client)
+            await asyncio.to_thread(dispatch_pending, app.state.database_url, app.state.email_sender)
+        except Exception:
+            logging.getLogger(__name__).warning("unpaid registration sweep failed", exc_info=True)
 
 
 app = create_app()
