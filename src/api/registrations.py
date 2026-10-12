@@ -195,6 +195,15 @@ def create_registration(payload: RegistrationRequest, request: Request, backgrou
                 raise HTTPException(403, "this invite is for a different team leader email")
             if invite.waive_payment:
                 return _register_waived(payload, request, background, team_name, leader_email, emails, price, now)
+    with _session(request) as session:
+        free_event = not current_event(session).payment_required
+    if free_event:
+        with _session(request) as session:
+            if is_limited(session, f"registration:{leader_email}", now, 10, timedelta(hours=1)):
+                session.commit()
+                raise HTTPException(429, "too many registration attempts")
+            session.commit()
+        return _register_waived(payload, request, background, team_name, leader_email, emails, price, now)
     api = request.app.state.payment_client
     if api is None:
         raise HTTPException(503, "payment provider is not configured")
@@ -293,11 +302,17 @@ def create_registration(payload: RegistrationRequest, request: Request, backgrou
 
 def _register_waived(payload: RegistrationRequest, request: Request, background: BackgroundTasks, team_name: str,
                      leader_email: str, emails: list[str], price, now: datetime) -> dict:
-    """An invited team whose fee is waived is registered as paid straight away, with no checkout."""
+    """A team with no fee to pay (an invite that waives it, or a free event) is registered as paid straight away."""
     leader = next(member for member in payload.members if member.role == "leader")
     with _session(request) as session:
         event = current_event(session, lock=True)
-        invite = _live_invite(session, payload.invite_token, now, lock=True)
+        invite = _live_invite(session, payload.invite_token, now, lock=True) if payload.invite_token else None
+        if invite is None or not invite.waive_payment:
+            if event.payment_required:
+                # The event was switched back to paid after this request started.
+                raise HTTPException(409, "registration now needs payment; please submit again")
+            if invite is None:
+                ensure_window_open(event, "registration", now)
         _raise_conflicts(session, team_name, leader_email, emails, now, replacing=None)
         pending = _leader_registration(session, leader_email, lock=True)
         if pending is not None:
@@ -321,11 +336,13 @@ def _register_waived(payload: RegistrationRequest, request: Request, background:
                 acm_review_status="PENDING" if member.is_acm_member else "NOT_APPLICABLE",
             ) for member in payload.members
         )
-        invite.used_at = now
-        invite.registration_id = registration.id
+        if invite is not None:
+            invite.used_at = now
+            invite.registration_id = registration.id
         session.flush()
         payments.activate_leader(session, registration)
-        audit(session, None, "Invited team registered", "registration", registration.id, team=team_name, fee_waived=True)
+        audit(session, None, "Invited team registered" if invite is not None else "Team registered (free event)",
+              "registration", registration.id, team=team_name, fee_waived=True)
         try:
             session.commit()
         except IntegrityError:

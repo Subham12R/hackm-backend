@@ -39,6 +39,7 @@ def event_payload(event: Event, now: datetime, stage: Stage | None) -> dict:
             "mode": registration_mode(event),
             "team_edits_close_at": _iso(team_edits_close_at(event)),
             "enabled": registration_mode(event) != "CLOSED",
+            "payment_required": event.payment_required,
         },
         "stage": {"id": str(stage.id), "name": stage.name} if stage else None,
         "submission": window_payload(stage, now) if stage else {"opens_at": None, "closes_at": None, "state": "NOT_OPEN"},
