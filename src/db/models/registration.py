@@ -24,6 +24,8 @@ class Event(Base):
     registration_mode: Mapped[str] = mapped_column(String(20), default="SCHEDULED", server_default="SCHEDULED")
     # Older switch, kept in step with the mode (False exactly when the mode is CLOSED) for older clients.
     registration_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # False makes the event free: teams are registered on submit, with no checkout.
+    payment_required: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     submission_opens_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     submission_closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     challenge_release_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

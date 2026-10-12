@@ -26,6 +26,7 @@ from src.db.models.registration import (
     Refund,
     Registration,
     RegistrationMember,
+    TeamInvite,
 )
 from src.registrations.pricing import TIER_BASE_PAISE, effective_registration_price, registration_category, with_processing_fee
 
@@ -360,7 +361,12 @@ def apply_refund_update(session: Session, entity: dict) -> bool:
 def activate_leader(session: Session, registration: Registration) -> None:
     user = session.scalar(select(User).where(User.email_normalized == registration.leader_email))
     participant_role = session.get(Role, RoleCode.PARTICIPANT)
-    amount_row = ("Entry fee", "Waived (invited team)") if registration.fee_waived else ("Amount paid", f"₹{registration.quoted_amount_minor // 100}")
+    if not registration.fee_waived:
+        amount_row = ("Amount paid", f"₹{registration.quoted_amount_minor // 100}")
+    elif session.scalar(select(TeamInvite.id).where(TeamInvite.registration_id == registration.id)):
+        amount_row = ("Entry fee", "Waived (invited team)")
+    else:
+        amount_row = ("Entry fee", "Free")
     confirmed = "Your team is registered" if registration.fee_waived else "Your payment is confirmed"
     if user is not None and user.status == UserStatus.ACTIVE:
         # Existing account (for example a staff member leading a team): grant access, no activation link.
@@ -371,7 +377,7 @@ def activate_leader(session: Session, registration: Registration) -> None:
             intro="Your team is registered. Sign in with your existing HackMatrix password.",
             rows=[("Account", user.email_normalized), amount_row, ("Event", "HackMatrix 26")],
             steps=["Open the sign-in page.", "Use your existing password.", "Open the participant dashboard."],
-            action="Sign in", url=f"{app_url()}/login", note="Use “Forgot password” if you do not remember it.", eyebrow="Payment confirmed",
+            action="Sign in", url=f"{app_url()}/login", note="Use “Forgot password” if you do not remember it.", eyebrow="Registration confirmed" if registration.fee_waived else "Payment confirmed",
         ))
         return
     if user is not None and user.status in (UserStatus.DISABLED, UserStatus.SUSPENDED):

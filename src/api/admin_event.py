@@ -48,6 +48,7 @@ class EventUpdate(BaseModel):
     registration_closes_at: datetime | None = None
     registration_enabled: bool | None = None
     registration_mode: Literal["OPEN", "CLOSED", "SCHEDULED"] | None = None
+    payment_required: bool | None = None
     submission_opens_at: datetime | None = None
     submission_closes_at: datetime | None = None
     challenge_release_at: datetime | None = None
@@ -110,7 +111,7 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
             fields.discard("registration_enabled")
             for field in fields:
                 value = getattr(payload, field)
-                if field in ("name", "timezone", "registration_mode") and value is None:
+                if field in ("name", "timezone", "registration_mode", "payment_required") and value is None:
                     continue
                 target, attribute = (stage, STAGE_FIELDS[field]) if field in STAGE_FIELDS else (event, field)
                 if getattr(target, attribute) != value:
