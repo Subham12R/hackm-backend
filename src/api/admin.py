@@ -438,6 +438,8 @@ def _registration_rows(session, registrations: list[Registration], timezone: str
             "acm_pending": sum(member.is_acm_member and member.acm_review_status in ("PENDING", "RECHECK") for member in team),
             "category": registration.category,
             "registration_status": registration.status,
+            # Free entry or a free invite: registered without paying.
+            "fee_waived": registration.fee_waived,
             "payment_status": latest.get(registration.id, "NOT_STARTED"),
             "payment_needs_review": registration.id in review,
             "adjustment_status": registration.adjustment_status,
