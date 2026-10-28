@@ -191,7 +191,7 @@ def test_refunds_are_bounded_idempotent_and_full_refund_revokes_access() -> None
     assert rest.status_code == 201 and rest.json()["amount_minor"] == 15000
     assert harness.client.post(url, headers=admin, json={"reason": "again", "idempotency_key": uuid4().hex}).status_code == 409
     assert _registration(payload["members"][0]["email"]).status == "REFUNDED"
-    assert harness.client.get("/api/v1/participant/dashboard", headers=leader_headers).status_code == 404
+    assert harness.client.get("/api/v1/participant/dashboard", headers=leader_headers).status_code == 410
     # Refund webhooks for refunds we already recorded are harmless.
     refund = harness.gateway.payment.refunds[0]
     assert harness.webhook("refund.processed", "refund", refund).json() == {"status": "processed"}

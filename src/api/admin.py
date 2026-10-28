@@ -37,7 +37,8 @@ from src.operations import submission_label, team_code
 from src.payments import service as payments
 from src.registrations.pricing import RegistrationCategory
 
-LISTED_STATUSES = ("PAYMENT_PENDING", "PAID", "REFUNDED")
+# Refunded teams are cancelled: they drop out of lists and counts, and stay under the Refunded filter and in the logs.
+LISTED_STATUSES = ("PAYMENT_PENDING", "PAID")
 
 
 class AssignRequest(BaseModel):

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from src import realtime
 from src.api.deps import authenticated_user
 from src.audit import audit
 from src.auth.policies import ADMIN_READ_ROLES, MONEY_ROLES, TEAM_REVIEW_ROLES
@@ -164,7 +165,7 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
             return registration_detail_payload(session, session.get(Registration, order.registration_id))
 
     @router.post("/payments/{attempt_id}/refunds", status_code=201)
-    def refund_payment(attempt_id: UUID, payload: RefundRequest, request: Request, authorization: str = Header()):
+    def refund_payment(attempt_id: UUID, payload: RefundRequest, request: Request, background: BackgroundTasks, authorization: str = Header()):
         api = request.app.state.payment_client
         if api is None:
             raise HTTPException(503, "payment provider is not configured")
@@ -208,19 +209,27 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
             outcome = "FAILED" if type(error).__name__ == "BadRequestError" else "UNKNOWN"
             provider_refund_id = None
 
-        session, _actor = authenticated_user(request, authorization, public_key, MONEY_ROLES)
+        session, actor = authenticated_user(request, authorization, public_key, MONEY_ROLES)
         with session:
             registration = session.get(Registration, registration_id, with_for_update=True)
             refund = session.get(Refund, refund_id, with_for_update=True)
+            change = None
             if refund.status == "REQUESTED":
                 refund.status = outcome
                 refund.provider_refund_id = provider_refund_id
                 if outcome == "PROCESSED":
                     refund.processed_at = datetime.now(UTC)
                 session.flush()
-                payments.settle_refund_totals(session, registration)
+                change = payments.settle_refund_totals(session, registration, actor)
+                payments.notify_refund(session, refund, registration)
             session.commit()
             request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            dispatch(request, background)
+            if change == "CANCELLED":
+                # An open dashboard refetches and shows the cancellation at once.
+                realtime.notify(request, realtime.team_channel(registration_id), realtime.message(
+                    "refund", "Registration cancelled", f"Your refund is on its way ({payments.REFUND_WINDOW}).", "URGENT", refresh=["dashboard"],
+                ))
             if outcome == "FAILED":
                 raise HTTPException(502, "the payment provider rejected the refund")
             return _refund_payload(refund)

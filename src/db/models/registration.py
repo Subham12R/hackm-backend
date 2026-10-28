@@ -223,6 +223,8 @@ class Refund(Base):
     created_by_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When the leader was emailed about this refund; set once so retries and webhooks never resend it.
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ActivationToken(Base):

@@ -64,6 +64,7 @@ class FakePayments:
         self.gateway = gateway
         self.refunds: list[dict] = []
         self.refund_error: Exception | None = None
+        self.refund_status = "processed"
 
     def fetch(self, payment_id):
         return self.gateway.payments[payment_id]
@@ -71,7 +72,7 @@ class FakePayments:
     def refund(self, payment_id, data):
         if self.refund_error is not None:
             raise self.refund_error
-        refund = {"id": f"rfnd_{uuid4().hex[:14]}", "payment_id": payment_id, "amount": data["amount"], "status": "processed", "receipt": data["receipt"]}
+        refund = {"id": f"rfnd_{uuid4().hex[:14]}", "payment_id": payment_id, "amount": data["amount"], "status": self.refund_status, "receipt": data["receipt"]}
         self.refunds.append(refund)
         return refund
 
