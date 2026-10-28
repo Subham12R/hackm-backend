@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
@@ -288,7 +289,9 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 session.commit()
                 request.app.state.cache.invalidate(ADMIN_AGGREGATES)
                 realtime.notify(request, realtime.team_channel(registration.id), realtime.message(
-                    "timer", "Your clock is running", f"{stage.name}: submit before {deadline.isoformat()}.", "INFO", refresh=["stages"],
+                    "timer", "Your clock is running",
+                    f"{stage.name}: submit before {deadline.astimezone(ZoneInfo(current_event(session).timezone)):%d %b %Y, %I:%M %p %Z}.",
+                    "INFO", refresh=["stages"],
                 ))
             return _stage_payload(session, stage, submission, now)
 
