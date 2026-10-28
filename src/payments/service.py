@@ -113,6 +113,9 @@ def apply_provider_payment(session: Session, payment: dict) -> PaymentOutcome:
         return PaymentOutcome("paid", order.purpose if order else None)
     if attempt.status == "NEEDS_REVIEW":
         return PaymentOutcome("needs_review", order.purpose if order else None)
+    if attempt.status == "DISMISSED":
+        # An organiser ruled it is not a HackMatrix payment; a replayed webhook must not queue it again.
+        return PaymentOutcome("ignored")
 
     attempt.amount_minor = int(payment.get("amount") or 0)
     attempt.currency = str(payment.get("currency") or "")

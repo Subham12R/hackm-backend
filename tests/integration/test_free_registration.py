@@ -38,6 +38,12 @@ def test_free_event_registers_teams_without_payment() -> None:
         # The completion email goes out on submit and says the entry is free.
         subject, html = next((subject, html) for to, subject, html in harness.sink.messages if to == leader_email)
         assert subject == "Activate your HackMatrix account" and "Free" in html and "Waived" not in html
+
+        # The admin lists flag it so the badge reads "free", not "paid".
+        rows = harness.client.get(f"/api/v1/admin/registrations?search={payload['team_name']}", headers=admin).json()["items"]
+        assert [(row["registration_status"], row["fee_waived"]) for row in rows] == [("PAID", True)]
+        teams = harness.client.get(f"/api/v1/admin/teams?search={payload['team_name']}", headers=admin).json()["items"]
+        assert [team["fee_waived"] for team in teams] == [True]
         leader = harness.activate_leader(leader_email)
         assert harness.client.get("/api/v1/participant/dashboard", headers=leader).json()["status"] == "PAID"
         # Same team again is a conflict, not a second free registration.
