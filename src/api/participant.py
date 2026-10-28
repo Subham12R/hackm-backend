@@ -114,10 +114,16 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
         # Row lock serializes this leader's writes (submission saves, team edits, balance orders).
         registration = session.scalar(query.with_for_update() if lock else query)
         if registration is None:
-            latest = session.scalar(select(Registration.status).where(Registration.leader_email == user.email_normalized)
-                                    .order_by(Registration.created_at.desc()).limit(1))
+            latest = session.execute(select(Registration.status, Registration.rejection_reason).where(Registration.leader_email == user.email_normalized)
+                                     .order_by(Registration.created_at.desc()).limit(1)).first()
             session.close()
-            if latest == "REFUNDED":
+            status, reason = latest if latest else (None, None)
+            if status == "REJECTED":
+                raise HTTPException(410, f"your registration was rejected: {reason}. Register again to take part.")
+            if status == "REFUNDED" and reason:
+                raise HTTPException(410, f"your registration was rejected: {reason}. Your refund is on its way "
+                                         f"({payments.REFUND_WINDOW}). Register again to take part.")
+            if status == "REFUNDED":
                 raise HTTPException(410, f"your registration was cancelled after a refund; the refund is on its way "
                                          f"({payments.REFUND_WINDOW}). Register again to take part.")
             raise HTTPException(404, "registration not found")
