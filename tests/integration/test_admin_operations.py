@@ -270,7 +270,7 @@ def test_overview_uses_captured_money_and_shared_recent_rows() -> None:
         expected_metrics = {
             "registrations": session.scalar(
                 select(func.count(Registration.id)).where(
-                    Registration.status.in_(("PAYMENT_PENDING", "PAID", "REFUNDED"))
+                    Registration.status.in_(("PAYMENT_PENDING", "PAID"))
                 )
             ),
             "paid_teams": session.scalar(

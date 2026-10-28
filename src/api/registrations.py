@@ -26,7 +26,9 @@ from src.payments import service as payments
 from src.payments.providers.razorpay import create_order, verify_webhook_signature
 from src.registrations.pricing import (
     TIER_BASE_PAISE,
+    active_discount,
     calculate_registration_price,
+    entry_fee_paise,
     processing_fee_ppm,
     registration_category,
     with_processing_fee,
@@ -90,10 +92,17 @@ def _session(request: Request):
 
 
 def _checkout(order: PaymentOrder, registration: Registration, request: Request) -> dict:
-    base = min(TIER_BASE_PAISE.get(registration.pricing_tier, order.amount_minor), order.amount_minor)
+    # Before any discount: an invite's fixed price, or the tier's normal price.
+    listed = registration.fixed_price_minor or TIER_BASE_PAISE.get(registration.pricing_tier, TIER_BASE_PAISE["standard"])
+    entry = entry_fee_paise(registration.pricing_tier, registration.fixed_price_minor, registration.discount_kind, registration.discount_value)
+    base = min(entry, order.amount_minor)
     return {"order_id": order.provider_order_id, "amount": order.amount_minor, "currency": order.currency,
             "key_id": request.app.state.razorpay_key_id, "team_name": registration.team_name,
-            # Breakdown for the pay page: the entry fee and the payment processing charge on top.
+            # Breakdown for the pay page: list price, discount, the entry fee, and the processing charge on top.
+            "list_amount": listed, "discount_amount": max(0, listed - entry),
+            "discount_kind": registration.discount_kind if listed > entry else "NONE",
+            "discount_value": registration.discount_value if listed > entry else 0,
+            "invite_price": bool(registration.fixed_price_minor),
             "base_amount": base, "fee_amount": order.amount_minor - base, "tier": registration.pricing_tier,
             # The gateway rate (fee + GST) fixed when this team registered, e.g. 2.36.
             "fee_percent": round((registration.processing_fee_ppm or 0) / 10_000, 2)}
@@ -124,7 +133,8 @@ def _live_invite(session: Session, token: str, now: datetime, lock: bool = False
 def invite_details(request: Request, token: str = Query(min_length=1, max_length=100)):
     with _session(request) as session:
         invite = _live_invite(session, token, datetime.now(UTC))
-        return {"email": invite.email_normalized, "waive_payment": invite.waive_payment, "expires_at": invite.expires_at.isoformat()}
+        return {"email": invite.email_normalized, "waive_payment": invite.waive_payment, "mode": "FREE" if invite.waive_payment else "PAID",
+                "price_minor": None if invite.waive_payment else invite.price_minor, "expires_at": invite.expires_at.isoformat()}
 
 
 class RsvpRequest(BaseModel):
@@ -183,20 +193,24 @@ def create_registration(payload: RegistrationRequest, request: Request, backgrou
         raise HTTPException(422, "this email address is reserved")
     price = calculate_registration_price([member.model_dump() for member in payload.members])
     fee_ppm = processing_fee_ppm()
-    charge = with_processing_fee(price.amount_paise, fee_ppm)
     leader_email = leaders[0].email.lower()
     team_name = " ".join(payload.team_name.split())
     now = datetime.now(UTC)
     invited = bool(payload.invite_token)
-    if invited:
-        with _session(request) as session:
-            invite = _live_invite(session, payload.invite_token, now)
+    with _session(request) as session:
+        event = current_event(session)
+        free_event = not event.payment_required
+        invite = _live_invite(session, payload.invite_token, now) if invited else None
+        if invite is not None:
             if invite.email_normalized != leader_email:
                 raise HTTPException(403, "this invite is for a different team leader email")
             if invite.waive_payment:
                 return _register_waived(payload, request, background, team_name, leader_email, emails, price, now)
-    with _session(request) as session:
-        free_event = not current_event(session).payment_required
+        # A paid invite's own price replaces the tier and any discount; otherwise the event's live discount applies.
+        fixed_price = invite.price_minor if invite is not None and invite.price_minor else None
+        discount = None if fixed_price else active_discount(event, now)
+    discount_kind, discount_value = (discount.kind, discount.value) if discount else ("NONE", 0)
+    charge = with_processing_fee(entry_fee_paise(price.tier, fixed_price, discount_kind, discount_value), fee_ppm)
     if free_event:
         with _session(request) as session:
             if is_limited(session, f"registration:{leader_email}", now, 10, timedelta(hours=1)):
@@ -273,6 +287,7 @@ def create_registration(payload: RegistrationRequest, request: Request, backgrou
         registration = Registration(
             id=registration_id, event_id=event.id, team_name=team_name, leader_email=leader_email, status="PAYMENT_PENDING",
             quoted_amount_minor=charge, effective_amount_minor=charge, pricing_tier=price.tier, processing_fee_ppm=fee_ppm,
+            discount_kind=discount_kind, discount_value=discount_value, fixed_price_minor=fixed_price,
             category=registration_category(price.tier, leaders[0].college).value,
         )
         session.add(registration)

@@ -121,7 +121,7 @@ def test_finalists_move_on_to_the_next_event_after_the_online_round(stages_clean
     # Problem statements stay hidden until their reveal time.
     harness.client.patch(f"/api/v1/admin/stages/{finals['id']}", headers=admin, json={"statements_release_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()})
     hidden = harness.client.get("/api/v1/participant/stages", headers=finalist).json()["stages"][-1]
-    assert hidden["tracks"] == [] and hidden["statements"] == {"release_at": hidden["statements"]["release_at"], "released": False, "count": 2}
+    assert hidden["tracks"] == [] and hidden["statements"] == {"release_at": hidden["statements"]["release_at"], "released": False, "count": 2, "requires_start": False}
 
     # Events with submissions are kept; empty ones can go, but never the last one.
     assert harness.client.delete(f"/api/v1/admin/stages/{finals['id']}", headers=admin).status_code == 409

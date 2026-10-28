@@ -8,6 +8,7 @@ from src.db.models.registration import Event
 from src.db.models.stage import Stage
 from src.events.stages import statements_released, window_payload
 from src.events.windows import registration_mode, team_edits_close_at, window_state
+from src.registrations.pricing import discount_state
 
 ACTIVE_EVENT_ID = UUID("00000000-0000-4000-8000-000000000001")
 
@@ -21,6 +22,14 @@ def current_event(session: Session, lock: bool = False) -> Event:
 
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
+
+
+def discount_payload(event: Event, now: datetime) -> dict:
+    state = discount_state(event, now)
+    return {
+        "kind": event.discount_kind or "NONE", "value": event.discount_value or 0, "label": event.discount_label or "",
+        "starts_at": _iso(event.discount_starts_at), "ends_at": _iso(event.discount_ends_at), "state": state, "active": state == "ACTIVE",
+    }
 
 
 def event_payload(event: Event, now: datetime, stage: Stage | None) -> dict:
@@ -40,6 +49,7 @@ def event_payload(event: Event, now: datetime, stage: Stage | None) -> dict:
             "team_edits_close_at": _iso(team_edits_close_at(event)),
             "enabled": registration_mode(event) != "CLOSED",
             "payment_required": event.payment_required,
+            "discount": discount_payload(event, now),
         },
         "stage": {"id": str(stage.id), "name": stage.name} if stage else None,
         "submission": window_payload(stage, now) if stage else {"opens_at": None, "closes_at": None, "state": "NOT_OPEN"},

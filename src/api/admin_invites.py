@@ -1,10 +1,11 @@
 from datetime import UTC, datetime
 from secrets import token_urlsafe
+from typing import Literal
 from uuid import UUID
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field, model_validator
 from sqlalchemy import select
 
 from src.api.deps import authenticated_user
@@ -21,7 +22,30 @@ from src.payments.service import app_url
 
 class TeamInviteRequest(BaseModel):
     email: EmailStr
+    # FREE registers the team with no payment; PAID charges amount_minor (or the team's normal price) plus gateway charges.
+    mode: Literal["FREE", "PAID"] | None = None
+    amount_minor: int | None = Field(default=None, ge=100, le=1_000_000)
+    # Older clients: waive_payment=true means FREE.
     waive_payment: bool = False
+
+    @model_validator(mode="after")
+    def settle_mode(self):
+        if self.mode is None:
+            self.mode = "FREE" if self.waive_payment else "PAID"
+        self.waive_payment = self.mode == "FREE"
+        if self.mode == "FREE":
+            self.amount_minor = None
+        elif self.amount_minor is not None and self.amount_minor % 100:
+            raise ValueError("the entry fee must be a whole number of rupees")
+        return self
+
+
+def _fee_text(invite: TeamInvite) -> str:
+    if invite.waive_payment:
+        return "Free"
+    if invite.price_minor:
+        return f"₹{invite.price_minor // 100} + gateway charges"
+    return "Your usual price, paid at checkout"
 
 
 def admin_invites_router(public_key: Ed25519PublicKey) -> APIRouter:
@@ -52,7 +76,7 @@ def admin_invites_router(public_key: Ed25519PublicKey) -> APIRouter:
             token = token_urlsafe(32)
             invite = TeamInvite(
                 event_id=ACTIVE_EVENT_ID, email_normalized=email, token_hash=invite_digest(token), waive_payment=payload.waive_payment,
-                expires_at=now + INVITE_TTL, invited_by_user_id=actor.id, created_at=now,
+                price_minor=payload.amount_minor, expires_at=now + INVITE_TTL, invited_by_user_id=actor.id, created_at=now,
             )
             session.add(invite)
             session.flush()
@@ -60,15 +84,16 @@ def admin_invites_router(public_key: Ed25519PublicKey) -> APIRouter:
             queue_email(session, email, "You're invited to register for HackMatrix", action_email(
                 title="Register your team for HackMatrix",
                 intro=f"The organisers have invited you to register a team. This link works for {minutes} minutes."
-                      + (" Your entry fee has been waived." if payload.waive_payment else ""),
-                rows=[("Team leader email", email), ("Entry fee", "Waived" if payload.waive_payment else "Paid at checkout")],
+                      + (" Your entry fee has been waived." if payload.waive_payment else
+                         f" Your entry fee is ₹{payload.amount_minor // 100} plus gateway charges." if payload.amount_minor else ""),
+                rows=[("Team leader email", email), ("Entry fee", _fee_text(invite))],
                 steps=["Open the link below.", "Enter your team using this email as the leader.",
                        "Activate your account from the email that follows." if payload.waive_payment else "Complete the payment."],
                 action="Register your team", url=f"{app_url()}/register?invite={token}",
                 note=f"The link expires {minutes} minutes after it was sent. Ask the organisers for a new one if it lapses.",
                 eyebrow="Team invite",
             ))
-            audit(session, actor, "Sent team invite", "team_invite", invite.id, email=email, waive_payment=payload.waive_payment)
+            audit(session, actor, "Sent team invite", "team_invite", invite.id, email=email, mode=payload.mode, amount_minor=payload.amount_minor)
             session.commit()
             background.add_task(dispatch_pending, request.app.state.database_url, request.app.state.email_sender)
             return _payload(invite, {actor.id: actor.display_name}, {}, now)
@@ -93,6 +118,7 @@ def _payload(invite: TeamInvite, senders: dict, teams: dict, now: datetime) -> d
     status = "USED" if invite.used_at else "EXPIRED" if invite.expires_at <= now else "ACTIVE"
     return {
         "id": str(invite.id), "email": invite.email_normalized, "waive_payment": invite.waive_payment, "status": status,
+        "mode": "FREE" if invite.waive_payment else "PAID", "price_minor": None if invite.waive_payment else invite.price_minor,
         "expires_at": invite.expires_at.isoformat(), "created_at": invite.created_at.isoformat(),
         "used_at": invite.used_at.isoformat() if invite.used_at else None,
         "team_name": teams.get(invite.registration_id), "invited_by": senders.get(invite.invited_by_user_id),

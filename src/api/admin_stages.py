@@ -26,6 +26,10 @@ from src.operations import team_code
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 SCHEDULE = ("submission_opens_at", "submission_closes_at", "statements_release_at")
+# Fields a null clears (instead of meaning "unchanged").
+CLEARABLE = (*SCHEDULE, "time_limit_minutes")
+# Per-team limit for timed events, from 15 minutes up to 14 days.
+TimeLimit = Annotated[int, Field(ge=15, le=20160)]
 
 
 class StageRequest(BaseModel):
@@ -36,6 +40,7 @@ class StageRequest(BaseModel):
     submission_opens_at: datetime | None = None
     submission_closes_at: datetime | None = None
     statements_release_at: datetime | None = None
+    time_limit_minutes: TimeLimit | None = None
 
     @model_validator(mode="after")
     def timezone_aware(self):
@@ -55,6 +60,7 @@ class StageUpdate(BaseModel):
     submission_opens_at: datetime | None = None
     submission_closes_at: datetime | None = None
     statements_release_at: datetime | None = None
+    time_limit_minutes: TimeLimit | None = None
 
     @model_validator(mode="after")
     def timezone_aware(self):
@@ -143,7 +149,7 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
             for field in payload.model_fields_set:
                 value = getattr(payload, field)
                 # Only the schedule can be cleared; a null name, flag or position means "unchanged".
-                if value is None and field not in SCHEDULE:
+                if value is None and field not in CLEARABLE:
                     continue
                 if getattr(stage, field) != value:
                     changes[field] = value.isoformat() if isinstance(value, datetime) else value
@@ -346,6 +352,9 @@ def _stage_payload(session, stage: Stage, now: datetime) -> dict:
         "submission_window": stage_rules.window_payload(stage, now),
         "statements": {"release_at": stage.statements_release_at.isoformat() if stage.statements_release_at else None,
                        "released": stage_rules.statements_released(stage, now)},
+        "time_limit_minutes": stage.time_limit_minutes,
+        "started": int(session.scalar(select(func.count(Submission.id)).where(Submission.stage_id == stage.id, Submission.started_at.is_not(None))) or 0)
+        if stage.time_limit_minutes else 0,
         "tracks": [stage_rules.track_payload(track) for track in stage_rules.tracks(session, stage.id)],
         "updated_at": stage.updated_at.isoformat() if stage.updated_at else None,
         "completed_at": stage.completed_at.isoformat() if stage.completed_at else None,

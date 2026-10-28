@@ -37,7 +37,8 @@ from src.operations import submission_label, team_code
 from src.payments import service as payments
 from src.registrations.pricing import RegistrationCategory
 
-LISTED_STATUSES = ("PAYMENT_PENDING", "PAID", "REFUNDED")
+# Refunded teams are cancelled: they drop out of lists and counts, and stay under the Refunded filter and in the logs.
+LISTED_STATUSES = ("PAYMENT_PENDING", "PAID")
 
 
 class AssignRequest(BaseModel):
@@ -168,6 +169,7 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
             stage_tracks = stage_rules.tracks(session, stage.id)
             track_names = {track.id: track.title for track in stage_tracks}
             round_ = judging.current_round(session, stage.id)
+            now = datetime.now(UTC)
             query = (
                 select(Registration, Submission)
                 .outerjoin(Submission, (Submission.registration_id == Registration.id) & (Submission.stage_id == stage.id))
@@ -212,6 +214,8 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
                     "description": submission.description if submission else "",
                     "track": {"id": str(submission.track_id), "title": track_names.get(submission.track_id, "")} if submission and submission.track_id else None,
                     "track_locked_at": submission.track_locked_at.isoformat() if submission and submission.track_locked_at else None,
+                    # Timed events: when the team started its clock and its own cut-off.
+                    "timer": stage_rules.timer_payload(stage, submission.started_at if submission else None, now),
                     "links": _submission_links(submission),
                     "start_time": registration.created_at.isoformat(),
                     "updated_at": submission.updated_at.isoformat() if submission and submission.updated_at else None,

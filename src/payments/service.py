@@ -16,6 +16,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from src.auth.policies import RoleCode
+from src.audit import audit
 from src.communications.outbox import queue_email
 from src.communications.templates import action_email
 from src.db.models.identity import AuditLog, Role, User, UserStatus
@@ -28,7 +29,7 @@ from src.db.models.registration import (
     RegistrationMember,
     TeamInvite,
 )
-from src.registrations.pricing import TIER_BASE_PAISE, effective_registration_price, registration_category, with_processing_fee
+from src.registrations.pricing import TIER_BASE_PAISE, effective_registration_price, entry_fee_paise, registration_category, with_processing_fee
 
 logger = logging.getLogger(__name__)
 
@@ -271,8 +272,9 @@ def reprice(session: Session, registration: Registration) -> None:
     members = registration_members(session, registration.id)
     price = effective_registration_price(members)
     leader = next((member for member in members if member.role == "leader"), None)
-    # The fee rate the team registered with also applies to any balance it owes later.
-    registration.effective_amount_minor = 0 if registration.fee_waived else with_processing_fee(price.amount_paise, registration.processing_fee_ppm or 0)
+    # The fee rate, discount and any invite price the team registered with also apply to any balance it owes later.
+    entry = entry_fee_paise(price.tier, registration.fixed_price_minor, registration.discount_kind, registration.discount_value)
+    registration.effective_amount_minor = 0 if registration.fee_waived else with_processing_fee(entry, registration.processing_fee_ppm or 0)
     registration.category = registration_category(price.tier, leader.college if leader else "").value
 
 
@@ -317,20 +319,98 @@ def refundable_amount(session: Session, attempt: PaymentAttempt) -> int:
     return attempt.amount_minor - int(committed)
 
 
-def settle_refund_totals(session: Session, registration: Registration) -> None:
+# Refunds Razorpay has accepted. UNKNOWN (unclear provider call) does not count until a webhook settles it.
+REFUND_ACCEPTED = ("PENDING", "PROCESSED")
+# Razorpay's usual timeline for a normal refund to reach the payer's bank, card or UPI account.
+REFUND_WINDOW = "5–7 working days"
+
+
+def _rupees(paise: int) -> str:
+    return f"₹{paise // 100}" if paise % 100 == 0 else f"₹{paise / 100:.2f}"
+
+
+def settle_refund_totals(session: Session, registration: Registration, actor: User | None = None) -> str | None:
+    """Cancel a registration once its entry payment is refunded in full; undo that if the refund then fails.
+
+    Returns "CANCELLED" or "RESTORED" when the registration's status changed, else None.
+    """
     processed = int(session.scalar(
         select(func.coalesce(func.sum(Refund.amount_minor), 0)).where(Refund.registration_id == registration.id, Refund.status == "PROCESSED")
     ) or 0)
     registration.refunded_amount_minor = processed
-    # Only refunds of fulfilling payments revoke the registration; refunding a duplicate does not.
+    # Only refunds of fulfilling payments revoke the registration; refunding a duplicate does not. The team
+    # is cancelled as soon as Razorpay accepts the refund, not days later when the money has moved.
     refunded_captured = int(session.scalar(
         select(func.coalesce(func.sum(Refund.amount_minor), 0))
         .join(PaymentAttempt, PaymentAttempt.id == Refund.payment_attempt_id)
-        .where(Refund.registration_id == registration.id, Refund.status == "PROCESSED", PaymentAttempt.status == "CAPTURED")
+        .where(Refund.registration_id == registration.id, Refund.status.in_(REFUND_ACCEPTED), PaymentAttempt.status == "CAPTURED")
     ) or 0)
     captured = captured_total(session, registration.id)
-    if registration.status == "PAID" and captured > 0 and refunded_captured >= captured:
+    covered = captured > 0 and refunded_captured >= captured
+    if registration.status == "PAID" and covered:
         registration.status = "REFUNDED"
+        audit(session, actor, "Registration cancelled after refund", "registration", registration.id,
+              team=registration.team_name, leader=registration.leader_email, refunded_minor=refunded_captured)
+        return "CANCELLED"
+    if registration.status == "REFUNDED" and captured > 0 and not covered:
+        # The leader may have registered a new team meanwhile; never give them two live registrations.
+        rival = session.scalar(select(Registration.id).where(
+            Registration.id != registration.id, Registration.event_id == registration.event_id,
+            Registration.status.in_(ACTIVE_STATUSES),
+            (Registration.leader_email == registration.leader_email) | (func.lower(Registration.team_name) == registration.team_name.lower()),
+        ).limit(1))
+        if rival is not None:
+            audit(session, actor, "Refund failed; registration left cancelled", "registration", registration.id,
+                  team=registration.team_name, reason="the leader or team name has a newer registration")
+            return None
+        registration.status = "PAID"
+        audit(session, actor, "Refund failed; registration restored", "registration", registration.id,
+              team=registration.team_name, leader=registration.leader_email)
+        queue_email(session, registration.leader_email, "HackMatrix: your refund did not go through", action_email(
+            title="Your refund did not go through",
+            intro=f"The refund for {registration.team_name} could not be completed by the payment provider, so no money is on its way "
+                  "and your registration is active again.",
+            rows=[("Team", registration.team_name), ("Status", "Registered")],
+            steps=["Sign in to the participant dashboard as usual.", "If you still want a refund, reply to the organisers."],
+            action="Open dashboard", url=f"{app_url()}/dashboard",
+            note="Questions: support@hackmatrix.codes", eyebrow="Refund update",
+        ))
+        return "RESTORED"
+    return None
+
+
+def notify_refund(session: Session, refund: Refund, registration: Registration) -> None:
+    """Email the leader once per refund, as soon as Razorpay has accepted it."""
+    if refund.notified_at is not None or refund.status not in REFUND_ACCEPTED:
+        return
+    refund.notified_at = datetime.now(UTC)
+    amount = _rupees(refund.amount_minor)
+    timing = f"It should reach the account you paid from within {REFUND_WINDOW}, depending on your bank."
+    rows = [("Team", registration.team_name), ("Refund", amount), ("Expected", REFUND_WINDOW)]
+    if registration.status == "REFUNDED":
+        html = action_email(
+            title="Your refund has been initiated",
+            intro=f"Your refund of {amount} has been initiated. {timing} "
+                  f"Your HackMatrix registration for {registration.team_name} has been cancelled.",
+            rows=[*rows, ("Registration", "Cancelled")],
+            steps=["Watch for the credit on your bank, card or UPI statement.", "To take part, register your team again."],
+            action="Register again", url=f"{app_url()}/register",
+            note=f"Not credited after {REFUND_WINDOW}? Write to support@hackmatrix.codes with your team name.",
+            eyebrow="Refund initiated",
+        )
+    else:
+        stays = " Your registration stays active." if registration.status == "PAID" else ""
+        html = action_email(
+            title="Your refund has been initiated",
+            intro=f"A refund of {amount} has been initiated. {timing}{stays}",
+            rows=rows,
+            steps=["Watch for the credit on your bank, card or UPI statement."],
+            action="Open dashboard" if registration.status == "PAID" else "Visit HackMatrix",
+            url=f"{app_url()}/dashboard" if registration.status == "PAID" else app_url(),
+            note=f"Not credited after {REFUND_WINDOW}? Write to support@hackmatrix.codes with your team name.",
+            eyebrow="Refund initiated",
+        )
+    queue_email(session, registration.leader_email, f"HackMatrix: your {amount} refund is on its way", html)
 
 
 def apply_refund_update(session: Session, entity: dict) -> bool:
@@ -353,8 +433,11 @@ def apply_refund_update(session: Session, entity: dict) -> bool:
         refund.processed_at = datetime.now(UTC)
     elif status == "failed" and refund.status != "PROCESSED":
         refund.status = "FAILED"
+    elif status == "pending" and refund.status in ("REQUESTED", "UNKNOWN"):
+        refund.status = "PENDING"
     session.flush()
     settle_refund_totals(session, registration)
+    notify_refund(session, refund, registration)
     return True
 
 
@@ -411,7 +494,8 @@ def activate_leader(session: Session, registration: Registration) -> None:
         intro=f"{confirmed}. Activate the leader account within 30 minutes.",
         rows=[("Account", user.email_normalized), amount_row, ("Event", "HackMatrix 26")],
         original_amount=f"₹{with_processing_fee(TIER_BASE_PAISE['standard'], registration.processing_fee_ppm or 0) // 100}"
-        if registration.pricing_tier != "standard" and not registration.fee_waived else None,
+        if (registration.pricing_tier != "standard" or registration.discount_kind != "NONE") and not registration.fee_waived
+        and not registration.fixed_price_minor else None,
         steps=["Press Activate account below.", "Choose a password.", "Sign in to the participant dashboard."],
         action="Activate account",
         url=f"{app_url()}/activate?token={token}",

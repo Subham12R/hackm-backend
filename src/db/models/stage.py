@@ -38,6 +38,8 @@ class Stage(Base):
     submission_opens_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     submission_closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     statements_release_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Optional per-team time limit: each team gets this long from when it starts, capped at submission close.
+    time_limit_minutes: Mapped[int | None] = mapped_column(Integer)
     # Set when an organiser marks the event completed; certificates for it can only be published after that.
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))

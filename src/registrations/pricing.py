@@ -2,6 +2,7 @@ import math
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 # What each tier must net after Razorpay's cut.
@@ -59,6 +60,59 @@ def registration_category(tier: str, leader_college: str) -> RegistrationCategor
     if tier == "adamas":
         return RegistrationCategory.ADAMAS_ONLY
     return RegistrationCategory.OUTER_COLLEGE
+
+
+DISCOUNT_KINDS = ("NONE", "PERCENT", "AMOUNT")
+# Discounts stay below the cheapest tier, so a discounted price is never zero (Razorpay needs at least ₹1).
+MAX_DISCOUNT_PERCENT = 99
+MAX_DISCOUNT_PAISE = min(TIER_BASE_PAISE.values()) - 100
+
+
+@dataclass(frozen=True)
+class Discount:
+    kind: str
+    value: int
+    label: str = ""
+
+
+def apply_discount(base_paise: int, kind: str | None, value: int | None) -> int:
+    """The entry fee after a percent or fixed-amount discount, rounded to a rupee and never below ₹1."""
+    if base_paise <= 0 or not value or kind not in ("PERCENT", "AMOUNT"):
+        return base_paise
+    off = base_paise * value // 100 if kind == "PERCENT" else value
+    return max(100, (base_paise - off) // 100 * 100)
+
+
+def active_discount(event: object, now: datetime) -> Discount | None:
+    """The event's discount if it is switched on and `now` is inside its window (unset bounds never block)."""
+    kind = getattr(event, "discount_kind", "NONE") or "NONE"
+    value = getattr(event, "discount_value", 0) or 0
+    if kind == "NONE" or value <= 0:
+        return None
+    starts, ends = getattr(event, "discount_starts_at", None), getattr(event, "discount_ends_at", None)
+    if (starts is not None and now < starts) or (ends is not None and now >= ends):
+        return None
+    return Discount(kind, value, getattr(event, "discount_label", "") or "")
+
+
+def discount_state(event: object, now: datetime) -> str:
+    """OFF, SCHEDULED (starts later), ACTIVE or ENDED, for organiser and registration pages."""
+    kind = getattr(event, "discount_kind", "NONE") or "NONE"
+    if kind == "NONE" or not (getattr(event, "discount_value", 0) or 0):
+        return "OFF"
+    starts, ends = getattr(event, "discount_starts_at", None), getattr(event, "discount_ends_at", None)
+    if ends is not None and now >= ends:
+        return "ENDED"
+    if starts is not None and now < starts:
+        return "SCHEDULED"
+    return "ACTIVE"
+
+
+def entry_fee_paise(tier: str, fixed_price_minor: int | None, discount_kind: str | None, discount_value: int | None) -> int:
+    """What a team's entry costs before gateway charges: an invite's fixed price, else its tier less any discount."""
+    if fixed_price_minor:
+        return fixed_price_minor
+    return apply_discount(TIER_BASE_PAISE.get(tier, TIER_BASE_PAISE["standard"]), discount_kind, discount_value)
 
 
 def processing_fee_ppm() -> int:

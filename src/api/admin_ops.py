@@ -210,7 +210,7 @@ def admin_ops_router(public_key: Ed25519PublicKey) -> APIRouter:
             def produce() -> dict:
                 timezone = current_event(session).timezone
                 day = func.date(func.timezone(timezone, Registration.created_at))
-                listed = Registration.status.in_(("PAYMENT_PENDING", "PAID", "REFUNDED"))
+                listed = Registration.status.in_(("PAYMENT_PENDING", "PAID"))
                 daily = session.execute(
                     select(day, func.count(Registration.id), func.sum(case((Registration.status == "PAID", 1), else_=0)))
                     .where(listed).group_by(day).order_by(day)
