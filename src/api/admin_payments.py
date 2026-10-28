@@ -201,6 +201,7 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
             session.commit()
 
         try:
+            rejection = ""
             result = create_refund(api, provider_payment_id, amount, str(refund_id), {"registration": str(registration_id)})
             outcome, provider_refund_id = ("PROCESSED" if result.get("status") == "processed" else "PENDING"), result.get("id")
         except Exception as error:
@@ -208,6 +209,8 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
             # A provider "bad request" is a definite rejection; anything else may have gone through.
             outcome = "FAILED" if type(error).__name__ == "BadRequestError" else "UNKNOWN"
             provider_refund_id = None
+            # Razorpay's own words (e.g. not enough balance), shown to the organiser and kept in the logs.
+            rejection = (str(error).strip() or type(error).__name__)[:300]
 
         session, actor = authenticated_user(request, authorization, public_key, MONEY_ROLES)
         with session:
@@ -222,6 +225,9 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
                 session.flush()
                 change = payments.settle_refund_totals(session, registration, actor)
                 payments.notify_refund(session, refund, registration)
+                if rejection:
+                    audit(session, actor, "Refund rejected by Razorpay" if outcome == "FAILED" else "Refund outcome unknown",
+                          "registration", registration.id, amount_minor=refund.amount_minor, provider_error=rejection)
             session.commit()
             request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             dispatch(request, background)
@@ -231,7 +237,7 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
                     "refund", "Registration cancelled", f"Your refund is on its way ({payments.REFUND_WINDOW}).", "URGENT", refresh=["dashboard"],
                 ))
             if outcome == "FAILED":
-                raise HTTPException(502, "the payment provider rejected the refund")
+                raise HTTPException(502, f"Razorpay rejected the refund: {rejection}. Nothing was refunded; fix this and try again.")
             return _refund_payload(refund)
 
     return router

@@ -51,9 +51,31 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
+          # Any failed step fails the job: a pull that breaks halfway must never look like a deploy.
           script: |
+            set -eu
             cd /opt/apps/hackm-backend
             test -f .env || { echo "missing /opt/apps/hackm-backend/.env"; exit 1; }
-            docker compose pull
+            # ghcr.io connections from the VPS are sometimes reset mid-download; retry before giving up.
+            pulled=0
+            for attempt in 1 2 3 4; do
+              if docker compose pull api; then pulled=1; break; fi
+              echo "pull attempt $attempt failed"
+              if [ "$attempt" -lt 4 ]; then sleep $((attempt * 10)); fi
+            done
+            [ "$pulled" -eq 1 ] || { echo "could not pull the new image; the old version is still running"; exit 1; }
+            docker compose pull db redis || echo "db/redis pull failed; keeping the current images"
             docker compose up -d --remove-orphans
+            running=$(docker inspect -f '{{.Image}}' hackm-backend)
+            latest=$(docker image inspect -f '{{.Id}}' ghcr.io/subham12r/hackm-backend:latest)
+            [ "$running" = "$latest" ] || { echo "hackm-backend runs $running, not the new image $latest"; exit 1; }
+            echo "hackm-backend runs the new image $latest"
+            # Migrations run before the API starts; give them a minute.
+            healthy=0
+            for second in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:8092/healthz > /dev/null; then healthy=1; break; fi
+              sleep 2
+            done
+            [ "$healthy" -eq 1 ] || { docker compose logs --tail 80 api; echo "the API did not become healthy"; exit 1; }
+            echo "API healthy"
             docker image prune -f
