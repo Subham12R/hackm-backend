@@ -31,6 +31,12 @@ class Event(Base):
     challenge_release_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Accepted finalists confirm attendance (RSVP) until this time; set when decisions are released.
     finals_rsvp_closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Registration discount: NONE, PERCENT (value 1-99) or AMOUNT (value in paise), live between the optional bounds.
+    discount_kind: Mapped[str] = mapped_column(String(10), default="NONE", server_default="NONE")
+    discount_value: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    discount_label: Mapped[str] = mapped_column(String(60), default="", server_default="")
+    discount_starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    discount_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
 
@@ -114,6 +120,11 @@ class Registration(Base):
     processing_fee_ppm: Mapped[int] = mapped_column(Integer, default=0)
     # Invited teams whose entry fee the organisers waived; they never owe a balance.
     fee_waived: Mapped[bool] = mapped_column(Boolean, default=False)
+    # The discount in force when the team registered; repricing after ACM review keeps it.
+    discount_kind: Mapped[str] = mapped_column(String(10), default="NONE", server_default="NONE")
+    discount_value: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Entry fee (paise, before gateway charges) set by a paid invite; tiers, discounts and ACM review never change it.
+    fixed_price_minor: Mapped[int | None] = mapped_column(Integer)
 
 
 class TeamInvite(Base):
@@ -125,7 +136,9 @@ class TeamInvite(Base):
     event_id: Mapped[UUID] = mapped_column(ForeignKey("events.id"), index=True)
     email_normalized: Mapped[str] = mapped_column(String(320), index=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    # Free mode; otherwise the team pays at checkout (price_minor if set, else its normal price).
     waive_payment: Mapped[bool] = mapped_column(Boolean, default=False)
+    price_minor: Mapped[int | None] = mapped_column(Integer)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     registration_id: Mapped[UUID | None] = mapped_column(ForeignKey("registrations.id", ondelete="SET NULL"))
@@ -233,6 +246,8 @@ class Submission(Base):
     track_id: Mapped[UUID | None] = mapped_column(ForeignKey("tracks.id", ondelete="SET NULL"))
     # Set once the team commits to its track; after that only an admin can change it.
     track_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When the team started a timed event's clock; problem statements and its personal deadline follow from it.
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(40), default="DRAFT")
     project_name: Mapped[str] = mapped_column(String(200), default="")
     github_url: Mapped[str] = mapped_column(String(500), default="")

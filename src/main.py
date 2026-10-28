@@ -27,6 +27,7 @@ from src.api.admin_invites import admin_invites_router
 from src.api.admin_judging import admin_judging_router
 from src.api.admin_ops import admin_ops_router
 from src.api.admin_payments import admin_payments_router
+from src.api.admin_site_notices import admin_site_notices_router
 from src.api.judge import judge_router
 from src.api.public import router as public_router
 from src.api.participant import participant_router
@@ -142,6 +143,7 @@ def create_app(
         app.include_router(admin_ops_router(public_key))
         app.include_router(admin_gallery_router(public_key))
         app.include_router(admin_invites_router(public_key))
+        app.include_router(admin_site_notices_router(public_key))
         app.include_router(admin_emails_router(public_key))
         app.include_router(admin_owner_router(public_key))
         app.include_router(admin_checkin_router(public_key))

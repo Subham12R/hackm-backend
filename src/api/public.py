@@ -7,13 +7,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.auth.rate_limits import is_limited
-from src.cache import PUBLIC_GALLERY, PUBLIC_LEADERBOARD
+from src.api.admin_site_notices import notice_row, public_payload, row_is_live
+from src.cache import PUBLIC_GALLERY, PUBLIC_LEADERBOARD, PUBLIC_NOTICES
 from src.credentials import service as credentials
 from src.credentials.codes import normalize as normalize_code
 from src.db.models.contact import ContactMessage
 from src.db.models.credential import BadgeDefinition, CertificateType, Credential
 from src.db.models.judging import ResultRow
-from src.db.models.media import GalleryPhoto
+from src.db.models.media import GalleryPhoto, SiteNotice
 from src.db.session import create_db_engine
 from src.events import stages as stage_rules
 from src.events.service import ACTIVE_EVENT_ID, current_event, event_payload
@@ -33,6 +34,19 @@ class ContactRequest(BaseModel):
 
 def _session(request: Request) -> Session:
     return Session(create_db_engine(request.app.state.database_url))
+
+
+@router.get("/site-notices")
+def site_notices(request: Request):
+    """Live notices for the strip above the site's navbar, most important first."""
+
+    def produce() -> list[dict]:
+        with _session(request) as session:
+            return [notice_row(item) for item in session.scalars(select(SiteNotice).where(SiteNotice.active))]
+
+    # Switched-on notices are cached; their show windows are checked on every request so they start and stop on time.
+    now = datetime.now(UTC)
+    return public_payload([row for row in request.app.state.cache.get_or_set(PUBLIC_NOTICES, "active", 300, produce) if row_is_live(row, now)])
 
 
 @router.get("/event")

@@ -1,6 +1,6 @@
 """Stages (shown as "Events"): which ones a team can see, take part in and submit to."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -54,6 +54,55 @@ def submission_state(stage: Stage, now: datetime) -> str:
 
 def statements_released(stage: Stage, now: datetime) -> bool:
     return stage.statements_release_at is not None and now >= stage.statements_release_at
+
+
+def is_timed(stage: Stage) -> bool:
+    return bool(stage.time_limit_minutes)
+
+
+def personal_deadline(stage: Stage, started_at: datetime | None) -> datetime | None:
+    """A team's own cut-off in a timed event: its time limit from when it started, never later than the event closes.
+
+    Starting 24 hours before the close leaves 24 hours, not the full limit.
+    """
+    if not is_timed(stage) or started_at is None:
+        return None
+    deadline = started_at + timedelta(minutes=stage.time_limit_minutes)
+    if stage.submission_closes_at is not None:
+        deadline = min(deadline, stage.submission_closes_at)
+    return deadline
+
+
+def timer_state(stage: Stage, started_at: datetime | None, now: datetime) -> str:
+    """UNTIMED, NOT_STARTED, RUNNING or EXPIRED."""
+    if not is_timed(stage):
+        return "UNTIMED"
+    if started_at is None:
+        return "EXPIRED" if submission_state(stage, now) == "CLOSED" else "NOT_STARTED"
+    return "RUNNING" if now < personal_deadline(stage, started_at) else "EXPIRED"
+
+
+def can_start(stage: Stage, now: datetime) -> str | None:
+    """Why a team cannot start its clock yet, or None when it can."""
+    if not is_timed(stage):
+        return "this event has no per-team timer"
+    if not statements_released(stage, now):
+        return "the problem statements are not out yet"
+    if submission_state(stage, now) == "CLOSED":
+        return "this event has closed"
+    return None
+
+
+def timer_payload(stage: Stage, started_at: datetime | None, now: datetime) -> dict | None:
+    if not is_timed(stage):
+        return None
+    deadline = personal_deadline(stage, started_at)
+    # What a team would get if it started right now, so the start button can say so.
+    preview = personal_deadline(stage, now) if started_at is None and can_start(stage, now) is None else None
+    return {
+        "limit_minutes": stage.time_limit_minutes, "started_at": _iso(started_at), "deadline": _iso(deadline),
+        "deadline_if_started_now": _iso(preview), "state": timer_state(stage, started_at, now),
+    }
 
 
 def is_eligible(stage: Stage, registration: Registration, released_only: bool = False) -> bool:

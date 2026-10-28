@@ -22,6 +22,7 @@ from src.db.models.stage import Track
 from src.events import stages as stage_rules
 from src.events.service import current_event, event_payload
 from src.payments.service import app_url
+from src.registrations.pricing import MAX_DISCOUNT_PAISE, MAX_DISCOUNT_PERCENT
 
 
 def _timezone(value: str) -> str:
@@ -49,17 +50,32 @@ class EventUpdate(BaseModel):
     registration_enabled: bool | None = None
     registration_mode: Literal["OPEN", "CLOSED", "SCHEDULED"] | None = None
     payment_required: bool | None = None
+    discount_kind: Literal["NONE", "PERCENT", "AMOUNT"] | None = None
+    # A percent for PERCENT, paise for AMOUNT.
+    discount_value: int | None = Field(default=None, ge=0)
+    discount_label: Annotated[str, StringConstraints(strip_whitespace=True, max_length=60)] | None = None
+    discount_starts_at: datetime | None = None
+    discount_ends_at: datetime | None = None
     submission_opens_at: datetime | None = None
     submission_closes_at: datetime | None = None
     challenge_release_at: datetime | None = None
 
     @model_validator(mode="after")
     def timezone_aware_and_ordered(self):
-        for name in ("starts_at", "ends_at", "registration_opens_at", "registration_closes_at", "submission_opens_at", "submission_closes_at", "challenge_release_at"):
+        for name in ("starts_at", "ends_at", "registration_opens_at", "registration_closes_at", "submission_opens_at", "submission_closes_at",
+                     "challenge_release_at", "discount_starts_at", "discount_ends_at"):
             value = getattr(self, name)
             if value is not None and value.tzinfo is None:
                 raise ValueError(f"{name} needs a time zone offset")
         return self
+
+
+def _check_discount(event) -> None:
+    """A discount must leave every tier above zero: 1-99 percent, or a whole-rupee amount below the cheapest tier."""
+    if event.discount_kind == "PERCENT" and not 1 <= event.discount_value <= MAX_DISCOUNT_PERCENT:
+        raise HTTPException(422, f"a percent discount must be between 1 and {MAX_DISCOUNT_PERCENT}")
+    if event.discount_kind == "AMOUNT" and (not 100 <= event.discount_value <= MAX_DISCOUNT_PAISE or event.discount_value % 100):
+        raise HTTPException(422, f"an amount discount must be a whole number of rupees from ₹1 to ₹{MAX_DISCOUNT_PAISE // 100}")
 
 
 # Older admin clients still send these on the event; they now belong to the first stage.
@@ -111,13 +127,15 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
             fields.discard("registration_enabled")
             for field in fields:
                 value = getattr(payload, field)
-                if field in ("name", "timezone", "registration_mode", "payment_required") and value is None:
+                if field in ("name", "timezone", "registration_mode", "payment_required", "discount_kind", "discount_value", "discount_label") and value is None:
                     continue
                 target, attribute = (stage, STAGE_FIELDS[field]) if field in STAGE_FIELDS else (event, field)
                 if getattr(target, attribute) != value:
                     changes[field] = value.isoformat() if isinstance(value, datetime) else value
                     setattr(target, attribute, value)
-            for target, opens, closes in ((event, "registration_opens_at", "registration_closes_at"), (stage, "submission_opens_at", "submission_closes_at"), (event, "starts_at", "ends_at")):
+            _check_discount(event)
+            for target, opens, closes in ((event, "registration_opens_at", "registration_closes_at"), (stage, "submission_opens_at", "submission_closes_at"),
+                                          (event, "starts_at", "ends_at"), (event, "discount_starts_at", "discount_ends_at")):
                 if getattr(target, opens) and getattr(target, closes) and getattr(target, opens) >= getattr(target, closes):
                     raise HTTPException(422, f"{opens.replace('_', ' ')} must be before {closes.replace('_', ' ')}")
             event.registration_enabled = event.registration_mode != "CLOSED"

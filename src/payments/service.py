@@ -28,7 +28,7 @@ from src.db.models.registration import (
     RegistrationMember,
     TeamInvite,
 )
-from src.registrations.pricing import TIER_BASE_PAISE, effective_registration_price, registration_category, with_processing_fee
+from src.registrations.pricing import TIER_BASE_PAISE, effective_registration_price, entry_fee_paise, registration_category, with_processing_fee
 
 logger = logging.getLogger(__name__)
 
@@ -271,8 +271,9 @@ def reprice(session: Session, registration: Registration) -> None:
     members = registration_members(session, registration.id)
     price = effective_registration_price(members)
     leader = next((member for member in members if member.role == "leader"), None)
-    # The fee rate the team registered with also applies to any balance it owes later.
-    registration.effective_amount_minor = 0 if registration.fee_waived else with_processing_fee(price.amount_paise, registration.processing_fee_ppm or 0)
+    # The fee rate, discount and any invite price the team registered with also apply to any balance it owes later.
+    entry = entry_fee_paise(price.tier, registration.fixed_price_minor, registration.discount_kind, registration.discount_value)
+    registration.effective_amount_minor = 0 if registration.fee_waived else with_processing_fee(entry, registration.processing_fee_ppm or 0)
     registration.category = registration_category(price.tier, leader.college if leader else "").value
 
 
@@ -411,7 +412,8 @@ def activate_leader(session: Session, registration: Registration) -> None:
         intro=f"{confirmed}. Activate the leader account within 30 minutes.",
         rows=[("Account", user.email_normalized), amount_row, ("Event", "HackMatrix 26")],
         original_amount=f"₹{with_processing_fee(TIER_BASE_PAISE['standard'], registration.processing_fee_ppm or 0) // 100}"
-        if registration.pricing_tier != "standard" and not registration.fee_waived else None,
+        if (registration.pricing_tier != "standard" or registration.discount_kind != "NONE") and not registration.fee_waived
+        and not registration.fixed_price_minor else None,
         steps=["Press Activate account below.", "Choose a password.", "Sign in to the participant dashboard."],
         action="Activate account",
         url=f"{app_url()}/activate?token={token}",
