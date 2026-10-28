@@ -198,7 +198,8 @@ class PaymentAttempt(Base):
     provider_payment_id: Mapped[str] = mapped_column(String(64), unique=True)
     amount_minor: Mapped[int] = mapped_column(Integer)
     currency: Mapped[str] = mapped_column(String(3))
-    # CAPTURED, FAILED, or NEEDS_REVIEW (captured money that could not fulfil an order).
+    # CAPTURED, FAILED, NEEDS_REVIEW (captured money that could not fulfil an order), or DISMISSED
+    # (an organiser ruled a review payment with no HackMatrix order is not ours).
     status: Mapped[str] = mapped_column(String(20))
     review_reason: Mapped[str | None] = mapped_column(String(80))
     method: Mapped[str | None] = mapped_column(String(40))

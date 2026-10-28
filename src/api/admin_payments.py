@@ -28,6 +28,10 @@ class AcmReviewRequest(BaseModel):
     status: Literal["PENDING", "VERIFIED", "REJECTED"]
 
 
+class DismissRequest(BaseModel):
+    note: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=300)]
+
+
 class RefundRequest(BaseModel):
     amount_minor: int | None = Field(default=None, gt=0)
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=500)]
@@ -163,6 +167,24 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
             dispatch(request, background)
             order = session.get(PaymentOrder, attempt.order_id)
             return registration_detail_payload(session, session.get(Registration, order.registration_id))
+
+    @router.post("/payments/{attempt_id}/dismiss")
+    def dismiss_payment(attempt_id: UUID, payload: DismissRequest, request: Request, authorization: str = Header()):
+        """Clear a captured payment that belongs to no HackMatrix order (another product on the same Razorpay
+        account, or an order from before a data reset). Nothing moves; the decision is kept in the audit log."""
+        session, actor = authenticated_user(request, authorization, public_key, MONEY_ROLES)
+        with session:
+            attempt = session.get(PaymentAttempt, attempt_id, with_for_update=True)
+            if attempt is None:
+                raise HTTPException(404, "payment not found")
+            if attempt.status != "NEEDS_REVIEW" or attempt.order_id is not None:
+                raise HTTPException(409, "only payments with no HackMatrix order can be dismissed; resolve the others from the team")
+            attempt.status = "DISMISSED"
+            audit(session, actor, "Payment dismissed", "payment", attempt.provider_payment_id, amount_minor=attempt.amount_minor,
+                  razorpay_order=attempt.provider_order_id, reason=attempt.review_reason, note=payload.note)
+            session.commit()
+            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            return {"id": str(attempt.id), "status": attempt.status}
 
     @router.post("/payments/{attempt_id}/refunds", status_code=201)
     def refund_payment(attempt_id: UUID, payload: RefundRequest, request: Request, background: BackgroundTasks, authorization: str = Header()):

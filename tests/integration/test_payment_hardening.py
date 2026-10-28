@@ -7,7 +7,7 @@ from uuid import uuid4
 from sqlalchemy import select, update
 
 from src.auth.policies import RoleCode
-from src.db.models.identity import User
+from src.db.models.identity import AuditLog, User
 from src.db.models.registration import PaymentAttempt, PaymentOrder, Registration, RegistrationMember
 from tests.helpers import Harness, db, registration_payload, staff
 
@@ -252,3 +252,34 @@ def test_paying_never_revives_a_disabled_account() -> None:
     with db() as session:
         assert session.scalar(select(User.status).where(User.email_normalized == email)) == "DISABLED"
     assert not [message for message in harness.sink.messages if message[0] == email]
+
+
+def test_a_payment_with_no_hackmatrix_order_can_be_dismissed_and_stays_dismissed() -> None:
+    harness = Harness()
+    stray = {"id": f"pay_{uuid4().hex[:14]}", "order_id": f"order_{uuid4().hex[:14]}", "amount": 307800, "currency": "INR",
+             "status": "captured", "method": "upi"}
+    assert harness.webhook("payment.captured", "payment", stray).json() == {"status": "needs_review"}
+    admin = harness.login(staff(RoleCode.SUPER_ADMIN), "admin")
+    viewer = harness.login(staff(RoleCode.EVENT_ADMIN), "admin")
+    queue = harness.client.get("/api/v1/admin/payments/review", headers=admin).json()["items"]
+    row = next(item for item in queue if item["provider_payment_id"] == stray["id"])
+    assert row["review_reason"] == "unknown_order" and row["registration_id"] is None
+    url = f"/api/v1/admin/payments/{row['id']}/dismiss"
+    assert harness.client.post(url, headers=viewer, json={"note": "other product"}).status_code == 403
+    assert harness.client.post(url, headers=admin, json={"note": "x"}).status_code == 422
+    dismissed = harness.client.post(url, headers=admin, json={"note": "SecureMail payment, not HackMatrix"})
+    assert dismissed.status_code == 200 and dismissed.json()["status"] == "DISMISSED"
+    queue = harness.client.get("/api/v1/admin/payments/review", headers=admin).json()["items"]
+    assert stray["id"] not in {item["provider_payment_id"] for item in queue}
+    # Razorpay retrying the webhook does not bring it back.
+    assert harness.webhook("payment.captured", "payment", stray).json() == {"status": "ignored"}
+    with db() as session:
+        assert session.scalar(select(PaymentAttempt.status).where(PaymentAttempt.provider_payment_id == stray["id"])) == "DISMISSED"
+        logged = session.scalar(select(AuditLog).where(AuditLog.action == "Payment dismissed", AuditLog.target_id == stray["id"]))
+        assert logged.metadata_json["note"] == "SecureMail payment, not HackMatrix" and logged.metadata_json["amount_minor"] == 307800
+
+    # A payment that belongs to a team is resolved from the team (accept or refund), never dismissed.
+    payload, _leader = harness.paid_team()
+    detail = harness.client.get(f"/api/v1/admin/registrations/{_registration(payload['members'][0]['email']).id}", headers=admin).json()
+    assert harness.client.post(f"/api/v1/admin/payments/{detail['payments'][0]['id']}/dismiss", headers=admin,
+                               json={"note": "not ours"}).status_code == 409
