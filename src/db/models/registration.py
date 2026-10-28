@@ -105,6 +105,9 @@ class Registration(Base):
     adjustment_status: Mapped[str] = mapped_column(String(20), default="NONE")
     adjustment_amount_minor: Mapped[int] = mapped_column(Integer, default=0)
     refunded_amount_minor: Mapped[int] = mapped_column(Integer, default=0)
+    # Set when a super admin rejects the team (status REJECTED, or REFUNDED when its fee was refunded).
+    rejection_reason: Mapped[str | None] = mapped_column(String(500))
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Finals selection: PENDING -> ACCEPTED or DECLINED. Only ACCEPTED teams appear at check-in.
     finals_status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
     finals_decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

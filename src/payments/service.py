@@ -382,6 +382,24 @@ def settle_refund_totals(session: Session, registration: Registration, actor: Us
     return None
 
 
+def rejection_email(registration: Registration, reason: str, refunded_paise: int) -> str:
+    """The single email a rejected team's leader gets; it covers the refund too, if there was one."""
+    money = (f"Your entry fee of {_rupees(refunded_paise)} is being refunded. It should reach the account you paid from "
+             f"within {REFUND_WINDOW}, depending on your bank.") if refunded_paise else "No payment was taken."
+    rows = [("Team", registration.team_name), ("Reason", reason)]
+    if refunded_paise:
+        rows += [("Refund", _rupees(refunded_paise)), ("Expected", REFUND_WINDOW)]
+    return action_email(
+        title="Your registration was rejected",
+        intro=f"The organisers rejected your HackMatrix registration for {registration.team_name}. {money}",
+        rows=rows,
+        steps=["Read the reason above.", "Fix what it mentions.", "Register your team again."],
+        action="Register again", url=f"{app_url()}/register",
+        note="Questions? Write to support@hackmatrix.codes with your team name.",
+        eyebrow="Registration rejected",
+    )
+
+
 def notify_refund(session: Session, refund: Refund, registration: Registration) -> None:
     """Email the leader once per refund, as soon as Razorpay has accepted it."""
     if refund.notified_at is not None or refund.status not in REFUND_ACCEPTED:

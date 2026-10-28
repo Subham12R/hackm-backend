@@ -1,7 +1,7 @@
 import logging
 from datetime import UTC, datetime
 from typing import Annotated, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
@@ -16,7 +16,8 @@ from src.auth.policies import ADMIN_READ_ROLES, MONEY_ROLES, TEAM_REVIEW_ROLES
 from src.cache import ADMIN_AGGREGATES
 from src.communications.outbox import dispatch_pending
 from src.db.models.identity import User
-from src.db.models.registration import PaymentAttempt, PaymentOrder, Refund, Registration, RegistrationMember
+from src.communications.outbox import queue_email
+from src.db.models.registration import PaymentAttempt, PaymentOrder, Refund, Registration, RegistrationMember, Submission
 from src.operations import team_code
 from src.payments import service as payments
 from src.payments.providers.razorpay import create_refund
@@ -30,6 +31,92 @@ class AcmReviewRequest(BaseModel):
 
 class DismissRequest(BaseModel):
     note: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=300)]
+
+
+class RejectRequest(BaseModel):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=500)]
+
+
+class BulkRequest(BaseModel):
+    action: Literal["cancel", "delete"]
+    ids: list[UUID] = Field(min_length=1, max_length=200)
+
+
+class SkipError(Exception):
+    """Why a registration was left alone: a 409 for a single action, a skipped row in a bulk one.
+
+    `keep_changes` marks work that must still be committed (e.g. a payment found while cancelling).
+    """
+
+    def __init__(self, reason: str, keep_changes: bool = False) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.keep_changes = keep_changes
+
+
+DELETABLE = ("ABANDONED", "REJECTED")
+
+
+def cancel_pending_registration(session, api, registration: Registration, actor: User) -> None:
+    """Retire an unpaid registration so its team name and emails can be reused."""
+    if registration.status != "PAYMENT_PENDING":
+        raise SkipError("only unpaid registrations can be cancelled")
+    orders = session.scalars(select(PaymentOrder).where(PaymentOrder.registration_id == registration.id, PaymentOrder.status == "CREATED").with_for_update()).all()
+    for order in orders:
+        payments.reconcile_order(session, api, order, force=True)
+    session.flush()
+    if registration.status != "PAYMENT_PENDING":
+        raise SkipError("the registration was paid while cancelling", keep_changes=True)
+    if any(payments.provider_has_live_payment(api, order) for order in orders):
+        raise SkipError("a payment is in progress on this registration")
+    registration.status = "ABANDONED"
+    for order in orders:
+        order.status = "CANCELLED"
+    audit(session, actor, "Cancelled pending registration", "registration", registration.id, team=registration.team_name)
+
+
+def delete_registration(session, registration: Registration, actor: User) -> None:
+    """Erase an abandoned or rejected registration that never took money; anything with a payment on record is kept."""
+    if registration.status not in DELETABLE:
+        raise SkipError("only abandoned or rejected registrations can be deleted; cancel an unpaid one first")
+    orders = session.scalars(select(PaymentOrder).where(PaymentOrder.registration_id == registration.id)).all()
+    attempts = session.scalars(select(PaymentAttempt).where(PaymentAttempt.order_id.in_([order.id for order in orders]))).all() if orders else []
+    if any(attempt.status != "FAILED" for attempt in attempts):
+        raise SkipError("this registration has a payment on record and is kept")
+    drafts = session.scalars(select(Submission).where(Submission.registration_id == registration.id)).all()
+    if any(draft.status == "SUBMITTED" for draft in drafts):
+        raise SkipError("this team submitted a project and is kept")
+    label = "Deleted abandoned registration" if registration.status == "ABANDONED" else "Deleted rejected registration"
+    audit(session, actor, label, "registration", registration.id, team=registration.team_name, leader=registration.leader_email)
+    for row in [*attempts, *orders, *drafts, *session.scalars(select(RegistrationMember).where(RegistrationMember.registration_id == registration.id))]:
+        session.delete(row)
+    session.flush()
+    session.delete(registration)
+    try:
+        session.flush()
+    except IntegrityError:
+        raise SkipError("this registration is referenced by other records and is kept") from None
+
+
+def provider_refund(api, provider_payment_id: str, amount: int, refund_id: UUID, registration_id: UUID) -> tuple[str, str | None, str]:
+    """Ask Razorpay for a refund: (outcome, Razorpay refund id, Razorpay's error in its own words or "")."""
+    try:
+        result = create_refund(api, provider_payment_id, amount, str(refund_id), {"registration": str(registration_id)})
+        return ("PROCESSED" if result.get("status") == "processed" else "PENDING"), result.get("id"), ""
+    except Exception as error:
+        logger.exception("razorpay refund failed")
+        # A provider "bad request" is a definite rejection; anything else may have gone through.
+        outcome = "FAILED" if type(error).__name__ == "BadRequestError" else "UNKNOWN"
+        return outcome, None, (str(error).strip() or type(error).__name__)[:300]
+
+
+def _apply_refund_outcome(refund: Refund, outcome: str, provider_refund_id: str | None) -> None:
+    if refund.status != "REQUESTED":
+        return
+    refund.status = outcome
+    refund.provider_refund_id = provider_refund_id
+    if outcome == "PROCESSED":
+        refund.processed_at = datetime.now(UTC)
 
 
 class RefundRequest(BaseModel):
@@ -106,50 +193,158 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
             registration = session.get(Registration, registration_id, with_for_update=True)
             if registration is None:
                 raise HTTPException(404, "registration not found")
-            if registration.status != "PAYMENT_PENDING":
-                raise HTTPException(409, "only unpaid registrations can be cancelled")
-            api = request.app.state.payment_client
-            orders = session.scalars(select(PaymentOrder).where(PaymentOrder.registration_id == registration.id, PaymentOrder.status == "CREATED").with_for_update()).all()
-            for order in orders:
-                payments.reconcile_order(session, api, order, force=True)
-            session.flush()
-            if registration.status != "PAYMENT_PENDING":
-                session.commit()
-                raise HTTPException(409, "the registration was paid while cancelling")
-            if any(payments.provider_has_live_payment(api, order) for order in orders):
-                raise HTTPException(409, "a payment is in progress on this registration")
-            registration.status = "ABANDONED"
-            for order in orders:
-                order.status = "CANCELLED"
-            audit(session, actor, "Cancelled pending registration", "registration", registration.id, team=registration.team_name)
+            try:
+                cancel_pending_registration(session, request.app.state.payment_client, registration, actor)
+            except SkipError as skip:
+                session.commit() if skip.keep_changes else session.rollback()
+                raise HTTPException(409, skip.reason) from None
             session.commit()
             request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             return registration_detail_payload(session, registration)
 
     @router.delete("/registrations/{registration_id}", status_code=204)
     def delete_unpaid(registration_id: UUID, request: Request, authorization: str = Header()):
-        """Erase an abandoned registration that never took money; anything with a payment on record is kept."""
+        """Erase an abandoned or rejected registration that never took money; anything with a payment on record is kept."""
         session, actor = authenticated_user(request, authorization, public_key, TEAM_REVIEW_ROLES)
         with session:
             registration = session.get(Registration, registration_id, with_for_update=True)
             if registration is None:
                 raise HTTPException(404, "registration not found")
-            if registration.status != "ABANDONED":
-                raise HTTPException(409, "only abandoned registrations can be deleted; cancel an unpaid one first")
-            orders = session.scalars(select(PaymentOrder).where(PaymentOrder.registration_id == registration.id)).all()
-            attempts = session.scalars(select(PaymentAttempt).where(PaymentAttempt.order_id.in_([order.id for order in orders]))).all() if orders else []
-            if any(attempt.status != "FAILED" for attempt in attempts):
-                raise HTTPException(409, "this registration has a payment on record and is kept")
-            audit(session, actor, "Deleted abandoned registration", "registration", registration.id, team=registration.team_name, leader=registration.leader_email)
-            for row in [*attempts, *orders, *session.scalars(select(RegistrationMember).where(RegistrationMember.registration_id == registration.id))]:
-                session.delete(row)
-            session.flush()
-            session.delete(registration)
             try:
-                session.commit()
-            except IntegrityError:
-                raise HTTPException(409, "this registration is referenced by other records and is kept") from None
+                delete_registration(session, registration, actor)
+            except SkipError as skip:
+                session.rollback()
+                raise HTTPException(409, skip.reason) from None
+            session.commit()
             request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+
+    @router.post("/registrations/bulk")
+    def bulk_registrations(payload: BulkRequest, request: Request, authorization: str = Header()):
+        """Cancel many unpaid registrations, or delete many abandoned/rejected ones; each team succeeds or is skipped on its own."""
+        session, actor = authenticated_user(request, authorization, public_key, MONEY_ROLES)
+        done: list[str] = []
+        skipped: list[dict] = []
+        with session:
+            for registration_id in dict.fromkeys(payload.ids):
+                registration = session.get(Registration, registration_id, with_for_update=True)
+                if registration is None:
+                    skipped.append({"id": str(registration_id), "team_name": None, "reason": "registration not found"})
+                    continue
+                team = registration.team_name
+                try:
+                    if payload.action == "cancel":
+                        cancel_pending_registration(session, request.app.state.payment_client, registration, actor)
+                    else:
+                        delete_registration(session, registration, actor)
+                except SkipError as skip:
+                    session.commit() if skip.keep_changes else session.rollback()
+                    skipped.append({"id": str(registration_id), "team_name": team, "reason": skip.reason})
+                    continue
+                session.commit()
+                done.append(str(registration_id))
+        request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+        return {"action": payload.action, "done": done, "skipped": skipped}
+
+    @router.post("/registrations/{registration_id}/reject")
+    def reject_registration(registration_id: UUID, payload: RejectRequest, request: Request, background: BackgroundTasks, authorization: str = Header()):
+        """Reject a registered team: refund everything it paid, cancel it, and email the leader the reason."""
+        session, actor = authenticated_user(request, authorization, public_key, MONEY_ROLES)
+        with session:
+            registration = session.get(Registration, registration_id, with_for_update=True)
+            if registration is None:
+                raise HTTPException(404, "registration not found")
+            if registration.status == "PAYMENT_PENDING":
+                raise HTTPException(409, "this registration is unpaid; cancel it instead")
+            if registration.status != "PAID":
+                raise HTTPException(409, "only registered teams can be rejected")
+            captured = session.scalars(
+                select(PaymentAttempt).join(PaymentOrder, PaymentOrder.id == PaymentAttempt.order_id)
+                .where(PaymentOrder.registration_id == registration.id, PaymentAttempt.status == "CAPTURED")
+                .order_by(PaymentAttempt.created_at).with_for_update(of=PaymentAttempt)
+            ).all()
+            plan = [(attempt, payments.refundable_amount(session, attempt)) for attempt in captured]
+            plan = [(attempt, amount) for attempt, amount in plan if amount > 0]
+            if not plan:
+                # Free entry, a free invite, or nothing left to give back: reject at once.
+                registration.status = "REJECTED"
+                registration.rejection_reason, registration.rejected_at = payload.reason, datetime.now(UTC)
+                audit(session, actor, "Registration rejected", "registration", registration.id,
+                      team=registration.team_name, leader=registration.leader_email, reason=payload.reason, refunded_minor=0)
+                queue_email(session, registration.leader_email, "Your HackMatrix registration was rejected",
+                            payments.rejection_email(registration, payload.reason, 0))
+                session.commit()
+                _after_rejection(request, background, registration.id)
+                return registration_detail_payload(session, registration)
+            if request.app.state.payment_client is None:
+                raise HTTPException(503, "payment provider is not configured")
+            jobs = []
+            for attempt, amount in plan:
+                refund = Refund(
+                    payment_attempt_id=attempt.id, registration_id=registration.id, idempotency_key=f"reject-{uuid4().hex}",
+                    amount_minor=amount, status="REQUESTED", reason=f"Registration rejected: {payload.reason}"[:500], created_by_user_id=actor.id,
+                )
+                session.add(refund)
+                session.flush()
+                jobs.append((refund.id, attempt.provider_payment_id, amount))
+            audit(session, actor, "Refund requested", "registration", registration.id,
+                  amount_minor=sum(amount for _attempt, amount in plan), reason=f"registration rejected: {payload.reason}")
+            # Commit before calling the provider so a concurrent request counts these refunds.
+            session.commit()
+
+        api = request.app.state.payment_client
+        results: dict[UUID, tuple[str, str | None]] = {}
+        failure, failure_outcome = "", ""
+        for refund_id, provider_payment_id, amount in jobs:
+            if failure:
+                # Never sent: one rejection means the rest would fail the same way.
+                results[refund_id] = ("FAILED", None)
+                continue
+            outcome, provider_refund_id, error = provider_refund(api, provider_payment_id, amount, refund_id, registration_id)
+            results[refund_id] = (outcome, provider_refund_id)
+            if outcome in ("FAILED", "UNKNOWN"):
+                failure, failure_outcome = error or "no answer from Razorpay", outcome
+
+        session, actor = authenticated_user(request, authorization, public_key, MONEY_ROLES)
+        with session:
+            registration = session.get(Registration, registration_id, with_for_update=True)
+            refunds = [session.get(Refund, refund_id, with_for_update=True) for refund_id in results]
+            for refund in refunds:
+                _apply_refund_outcome(refund, *results[refund.id])
+            session.flush()
+            change = payments.settle_refund_totals(session, registration, actor)
+            refunded = sum(refund.amount_minor for refund in refunds if refund.status in payments.REFUND_ACCEPTED)
+            if change == "CANCELLED":
+                registration.rejection_reason, registration.rejected_at = payload.reason, datetime.now(UTC)
+                for refund in refunds:
+                    refund.notified_at = datetime.now(UTC)  # the rejection email below covers the refund
+                audit(session, actor, "Registration rejected", "registration", registration.id,
+                      team=registration.team_name, leader=registration.leader_email, reason=payload.reason, refunded_minor=refunded)
+                queue_email(session, registration.leader_email, "Your HackMatrix registration was rejected",
+                            payments.rejection_email(registration, payload.reason, refunded))
+            else:
+                for refund in refunds:
+                    payments.notify_refund(session, refund, registration)
+                audit(session, actor, "Rejection stopped: refund not completed", "registration", registration.id,
+                      provider_error=failure, refunded_minor=refunded)
+            session.commit()
+            if change == "CANCELLED":
+                _after_rejection(request, background, registration.id)
+                return registration_detail_payload(session, registration)
+            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            dispatch(request, background)
+            message = (f"Razorpay rejected the refund: {failure}." if failure_outcome == "FAILED"
+                       else f"Razorpay did not confirm the refund ({failure}); check the Razorpay dashboard before trying again.")
+            if refunded:
+                message += f" {payments._rupees(refunded)} was already refunded."
+            raise HTTPException(502, f"{message} The team stays registered.")
+
+    def _after_rejection(request: Request, background: BackgroundTasks, registration_id) -> None:
+        request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+        dispatch(request, background)
+        # An open dashboard refetches and shows the rejection at once.
+        realtime.notify(request, realtime.team_channel(registration_id), realtime.message(
+            "rejected", "Registration rejected", "The organisers rejected your registration. Check your email.", "URGENT", refresh=["dashboard"],
+        ))
 
     @router.post("/payments/{attempt_id}/accept")
     def accept_payment(attempt_id: UUID, request: Request, background: BackgroundTasks, authorization: str = Header()):
@@ -222,17 +417,8 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
             # Commit before calling the provider so a concurrent request counts this refund.
             session.commit()
 
-        try:
-            rejection = ""
-            result = create_refund(api, provider_payment_id, amount, str(refund_id), {"registration": str(registration_id)})
-            outcome, provider_refund_id = ("PROCESSED" if result.get("status") == "processed" else "PENDING"), result.get("id")
-        except Exception as error:
-            logger.exception("razorpay refund failed")
-            # A provider "bad request" is a definite rejection; anything else may have gone through.
-            outcome = "FAILED" if type(error).__name__ == "BadRequestError" else "UNKNOWN"
-            provider_refund_id = None
-            # Razorpay's own words (e.g. not enough balance), shown to the organiser and kept in the logs.
-            rejection = (str(error).strip() or type(error).__name__)[:300]
+        # Razorpay's own words (e.g. not enough balance) are shown to the organiser and kept in the logs.
+        outcome, provider_refund_id, rejection = provider_refund(api, provider_payment_id, amount, refund_id, registration_id)
 
         session, actor = authenticated_user(request, authorization, public_key, MONEY_ROLES)
         with session:
@@ -240,10 +426,7 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
             refund = session.get(Refund, refund_id, with_for_update=True)
             change = None
             if refund.status == "REQUESTED":
-                refund.status = outcome
-                refund.provider_refund_id = provider_refund_id
-                if outcome == "PROCESSED":
-                    refund.processed_at = datetime.now(UTC)
+                _apply_refund_outcome(refund, outcome, provider_refund_id)
                 session.flush()
                 change = payments.settle_refund_totals(session, registration, actor)
                 payments.notify_refund(session, refund, registration)
@@ -280,6 +463,8 @@ def registration_detail_payload(session, registration: Registration) -> dict:
         "leader_email": registration.leader_email,
         "status": registration.status,
         "fee_waived": registration.fee_waived,
+        "rejection_reason": registration.rejection_reason,
+        "rejected_at": registration.rejected_at.isoformat() if registration.rejected_at else None,
         "category": registration.category,
         "pricing_tier": registration.pricing_tier,
         "quoted_amount_minor": registration.quoted_amount_minor,
