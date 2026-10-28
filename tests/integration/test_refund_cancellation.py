@@ -91,3 +91,25 @@ def test_a_failed_refund_restores_the_team() -> None:
     assert any(subject == "HackMatrix: your refund did not go through" for to, subject, _html in harness.sink.messages if to == email)
     with db() as session:
         assert session.scalar(select(AuditLog.id).where(AuditLog.action == "Refund failed; registration restored")) is not None
+
+
+def test_a_rejected_refund_says_why_and_keeps_the_team() -> None:
+    from razorpay.errors import BadRequestError
+
+    harness = Harness()
+    payload, leader = harness.paid_team()
+    email = payload["members"][0]["email"]
+    admin = harness.login(staff(RoleCode.SUPER_ADMIN), "admin")
+    harness.gateway.payment.refund_error = BadRequestError("Your account does not have enough balance to carry out the refund operation.")
+    rejected = _refund(harness, admin, email)
+    assert rejected.status_code == 502
+    assert "Razorpay rejected the refund: Your account does not have enough balance" in rejected.json()["detail"]
+    assert _registration(email).status == "PAID"
+    assert _refund_mail(harness, email) == []
+    with db() as session:
+        logged = session.scalar(select(AuditLog).where(AuditLog.action == "Refund rejected by Razorpay"))
+        assert "enough balance" in logged.metadata_json["provider_error"]
+    # Fixed on Razorpay's side, a fresh attempt goes through.
+    harness.gateway.payment.refund_error = None
+    assert _refund(harness, admin, email).status_code == 201
+    assert _registration(email).status == "REFUNDED"
