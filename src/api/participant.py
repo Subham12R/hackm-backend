@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from pydantic import AfterValidator, BaseModel, Field, StringConstraints
+from pydantic import AfterValidator, BaseModel, EmailStr, Field, StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
@@ -91,10 +91,16 @@ class TrackChoiceRequest(BaseModel):
 
 
 class MemberUpdateRequest(BaseModel):
+    # Non-leader members only, while registration is open; a new email sends the team back for review.
+    email: EmailStr | None = None
     full_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)] | None = None
     phone: Annotated[str, AfterValidator(_phone)] | None = None
     college: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)] | None = None
     acm_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)] | None = None
+
+
+class LeaderRequest(BaseModel):
+    member_id: UUID
 
 
 class ReadRequest(BaseModel):
@@ -117,6 +123,11 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
         if registration is None:
             latest = session.execute(select(Registration.status, Registration.rejection_reason).where(Registration.leader_email == user.email_normalized)
                                      .order_by(Registration.created_at.desc()).limit(1)).first()
+            # A former leader who handed the team over stays a member; tell them who has the dashboard now.
+            team = session.execute(select(Registration.team_name, Registration.leader_email)
+                                   .join(RegistrationMember, RegistrationMember.registration_id == Registration.id)
+                                   .where(RegistrationMember.email_normalized == user.email_normalized, Registration.status == "PAID")
+                                   .limit(1)).first()
             session.close()
             status, reason = latest if latest else (None, None)
             if status == "REJECTED":
@@ -127,6 +138,9 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
             if status == "REFUNDED":
                 raise HTTPException(410, f"your registration was cancelled after a refund; the refund is on its way "
                                          f"({payments.REFUND_WINDOW}). Register again to take part.")
+            if team is not None and status in (None, "PAID", "ABANDONED"):
+                raise HTTPException(403, f"{team.team_name} is now led by {team.leader_email}, so only they can open the team "
+                                         "dashboard. You are still on the team as a member.")
             raise HTTPException(404, "registration not found")
         return session, user, registration
 
@@ -212,6 +226,15 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
             if member is None or member.registration_id != registration.id:
                 raise HTTPException(404, "member not found")
             changes: dict[str, dict[str, str | None]] = {}
+            review_reset = False
+            if payload.email is not None and str(payload.email).lower() != member.email_normalized:
+                if not roster_edits_open(event, datetime.now(UTC)):
+                    raise HTTPException(403, "registration has closed, so only the organisers can change a member's email now")
+                previous_email = member.email_normalized
+                if roster.change_email(session, registration, member, str(payload.email)):
+                    changes["email"] = {"from": previous_email, "to": member.email_normalized}
+                    # A new address is a new person as far as verification goes; name or college fixes are not.
+                    review_reset = roster.reset_review(registration)
             for field, column in (("full_name", "full_name"), ("phone", "phone"), ("college", "college")):
                 value = getattr(payload, field)
                 if value is not None and value != getattr(member, column):
@@ -234,13 +257,14 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 session.flush()
                 payments.refresh_adjustment(session, registration)
                 audit(session, user, "Participant edited team member", "registration", registration.id,
-                      member=member.email_normalized, changes=changes)
+                      member=member.email_normalized, changes=changes, review_reset=review_reset)
                 session.commit()
                 request.app.state.cache.invalidate(ADMIN_AGGREGATES)
                 background.add_task(dispatch_pending, request.app.state.database_url, request.app.state.email_sender)
             return {
                 "member": _member_payload(member),
                 "adjustment": {"status": registration.adjustment_status, "amount_minor": registration.adjustment_amount_minor},
+                "verification": _verification(registration, payments.registration_members(session, registration.id)),
             }
 
     def roster_change(request: Request, background: BackgroundTasks, session: Session, user: User, registration: Registration,
@@ -283,6 +307,24 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 raise HTTPException(404, "member not found")
             roster.remove_member(session, registration, member)
             return roster_change(request, background, session, user, registration, "removed", member)
+
+    @router.post("/team/leader")
+    def transfer_leadership(payload: LeaderRequest, request: Request, background: BackgroundTasks, authorization: str = Header()):
+        """Hand the team to another member. The caller loses dashboard access once this commits."""
+        session, user, registration = leader_registration(request, authorization, lock=True)
+        with session:
+            open_roster(session)
+            member = session.get(RegistrationMember, payload.member_id)
+            if member is None or member.registration_id != registration.id:
+                raise HTTPException(404, "member not found")
+            roster.transfer_leadership(session, registration, member)
+            was_reviewed = roster.reset_review(registration)
+            audit(session, user, "Participant handed over team leadership", "registration", registration.id,
+                  new_leader=member.email_normalized, review_reset=was_reviewed)
+            session.commit()
+            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            background.add_task(dispatch_pending, request.app.state.database_url, request.app.state.email_sender)
+            return {"leader": _member_payload(member)}
 
     @router.post("/rsvp")
     def rsvp(payload: RsvpAnswer, request: Request, authorization: str = Header()):
