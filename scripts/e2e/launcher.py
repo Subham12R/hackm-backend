@@ -17,7 +17,7 @@ from tests.helpers import FakeRazorpay, TEST_DATABASE_URL, migrate
 
 
 class FileSink:
-    def send(self, recipient, subject, html):
+    def send(self, recipient, subject, html, **_options):
         with open(os.path.join(os.environ.get("E2E_DIR", os.path.dirname(os.path.abspath(__file__))), "emails.jsonl"), "a") as handle:
             handle.write(json.dumps({"to": recipient, "subject": subject, "html": html}) + "\n")
 

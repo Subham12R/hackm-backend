@@ -282,8 +282,11 @@ def reprice(session: Session, registration: Registration) -> None:
     registration.category = registration_category(price.tier, leader.college if leader else "").value
 
 
-def refresh_adjustment(session: Session, registration: Registration, notify: bool = True) -> None:
-    """Set the adjustment state from what is owed versus what was actually captured."""
+def refresh_adjustment(session: Session, registration: Registration, notify: bool = True, reason: str | None = None) -> None:
+    """Set the adjustment state from what is owed versus what was actually captured.
+
+    `reason` explains a new balance in the leader's email; the default blames an unverified ACM claim.
+    """
     reprice(session, registration)
     if registration.status != "PAID":
         return
@@ -304,7 +307,7 @@ def refresh_adjustment(session: Session, registration: Registration, notify: boo
         if notify and (previous_status != "REQUIRED" or previous_amount != owed):
             queue_email(session, registration.leader_email, "HackMatrix registration: balance due", action_email(
                 title="A balance is due on your registration",
-                intro="An ACM membership claim on your team could not be verified, so the discounted rate no longer applies.",
+                intro=reason or "An ACM membership claim on your team could not be verified, so the discounted rate no longer applies.",
                 rows=[("Team", registration.team_name), ("Amount due", f"₹{owed // 100}")],
                 steps=["Sign in to the participant dashboard.", "Pay the balance from the payment banner.", "Final submission unlocks once it is paid."],
                 action="Open dashboard", url=f"{app_url()}/dashboard",
