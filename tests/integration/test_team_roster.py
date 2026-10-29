@@ -104,10 +104,10 @@ def test_after_registration_closes_only_organisers_change_the_roster() -> None:
         newcomer = next(member for member in added.json()["members"] if member["name"] == "Organiser Pick")
         assert harness.client.delete(f"{URL}/{newcomer['id']}", headers=leader).status_code == 403
 
-        edited = harness.client.patch(f"{teams}/{newcomer['id']}", headers=admin, json={"email": "Fixed@Example.com", "college": "Fixed College"})
+        edited = harness.client.patch(f"{teams}/{newcomer['id']}", headers=admin, json={"email": f"Fixed-{uuid4().hex[:8]}@Example.com", "college": "Fixed College"})
         assert edited.status_code == 200
         fixed = next(member for member in edited.json()["members"] if member["id"] == newcomer["id"])
-        assert fixed["email"] == "fixed@example.com" and fixed["college"] == "Fixed College"
+        assert fixed["email"].startswith("fixed-") and fixed["college"] == "Fixed College"
         leader_id = next(member["id"] for member in edited.json()["members"] if member["role"] == "leader")
         assert harness.client.patch(f"{teams}/{leader_id}", headers=admin, json={"email": "other@example.com"}).status_code == 409
         assert harness.client.delete(f"{teams}/{leader_id}", headers=admin).status_code == 409
@@ -118,3 +118,60 @@ def test_after_registration_closes_only_organisers_change_the_roster() -> None:
     assert harness.client.get("/api/v1/participant/dashboard", headers=leader).json()["verification"]["details"] == "VERIFIED"
     viewer = harness.login(staff(RoleCode.VIEWER), "admin")
     assert harness.client.post(teams, headers=viewer, json=_person()).status_code == 403
+
+
+def test_member_email_changes_need_review_but_name_fixes_do_not() -> None:
+    harness = Harness()
+    payload, leader = harness.paid_team()
+    admin = harness.login(staff(RoleCode.REGISTRATION_ADMIN), "admin")
+    _verify(harness, admin, payload["members"][0]["email"])
+    members = harness.client.get("/api/v1/participant/dashboard", headers=leader).json()["members"]
+    other = next(member for member in members if member["role"] == "member")
+    leader_id = next(member["id"] for member in members if member["role"] == "leader")
+    renamed = harness.client.patch(f"{URL}/{other['id']}", headers=leader, json={"full_name": "Fixed Name", "college": "Fixed College"})
+    assert renamed.status_code == 200 and renamed.json()["verification"]["details"] == "VERIFIED"
+    new_email = f"Moved-{uuid4().hex[:8]}@Example.com"
+    moved = harness.client.patch(f"{URL}/{other['id']}", headers=leader, json={"email": new_email})
+    assert moved.status_code == 200 and moved.json()["member"]["email"] == new_email.lower()
+    assert moved.json()["verification"]["details"] == "PENDING"
+    assert harness.client.patch(f"{URL}/{leader_id}", headers=leader, json={"email": "boss@example.com"}).status_code == 409
+    with registration_mode("CLOSED"):
+        assert harness.client.patch(f"{URL}/{other['id']}", headers=leader, json={"email": "late@example.com"}).status_code == 403
+
+
+def test_leaders_hand_over_leadership_and_the_new_leader_activates() -> None:
+    import re
+
+    harness = Harness()
+    payload, leader = harness.paid_team()
+    admin = harness.login(staff(RoleCode.REGISTRATION_ADMIN), "admin")
+    _verify(harness, admin, payload["members"][0]["email"])
+    members = harness.client.get("/api/v1/participant/dashboard", headers=leader).json()["members"]
+    heir = next(member for member in members if member["role"] == "member")
+    with registration_mode("CLOSED"):
+        assert harness.client.post("/api/v1/participant/team/leader", headers=leader, json={"member_id": heir["id"]}).status_code == 403
+    handed = harness.client.post("/api/v1/participant/team/leader", headers=leader, json={"member_id": heir["id"]})
+    assert handed.status_code == 200, handed.text
+    # The old leader's dashboard stops loading; the new leader activates from their email.
+    gone = harness.client.get("/api/v1/participant/dashboard", headers=leader)
+    assert gone.status_code == 403 and f"is now led by {heir['email']}" in gone.json()["detail"]
+    html = next(html for to, subject, html in reversed(harness.sink.messages) if to == heir["email"] and "you now lead" in subject)
+    token = re.search(r"activate\?token=([^\"&<\s]+)", html).group(1)
+    activated = harness.client.post("/api/v1/auth/activate", json={"token": token, "password": "password"})
+    assert activated.status_code == 200
+    new_leader = {"Authorization": f"Bearer {activated.json()['tokens']['access_token']}"}
+    dashboard = harness.client.get("/api/v1/participant/dashboard", headers=new_leader).json()
+    roles = {member["email"]: member["role"] for member in dashboard["members"]}
+    assert roles[heir["email"]] == "leader" and roles[payload["members"][0]["email"]] == "member"
+    assert dashboard["verification"]["details"] == "PENDING"
+    assert any(to == payload["members"][0]["email"] and "now leads" in subject for to, subject, _html in harness.sink.messages)
+
+    # Organisers can hand it back after registration closes, and that needs no new review.
+    with db() as session:
+        registration_id = str(session.scalar(select(Registration.id).where(Registration.leader_email == heir["email"])))
+    _verify(harness, admin, heir["email"])
+    old_id = next(member["id"] for member in dashboard["members"] if member["email"] == payload["members"][0]["email"])
+    with registration_mode("CLOSED"):
+        back = harness.client.post(f"/api/v1/admin/teams/{registration_id}/leader", headers=admin, json={"member_id": old_id})
+        assert back.status_code == 200 and back.json()["leader_email"] == payload["members"][0]["email"]
+    assert harness.client.get("/api/v1/participant/dashboard", headers=leader).json()["verification"]["details"] == "VERIFIED"

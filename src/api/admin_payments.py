@@ -39,6 +39,10 @@ class AdminMemberUpdate(BaseModel):
     acm_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)] | None = None
 
 
+class LeaderRequest(BaseModel):
+    member_id: UUID
+
+
 class DismissRequest(BaseModel):
     note: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=300)]
 
@@ -234,13 +238,9 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
             if member is None or member.registration_id != registration.id:
                 raise HTTPException(404, "member not found")
             changes: dict[str, dict[str, str | None]] = {}
-            if payload.email is not None and str(payload.email).lower() != member.email_normalized:
-                if member.role == "leader":
-                    raise HTTPException(409, "the leader's email is their sign-in; it cannot change here")
-                email = str(payload.email).lower()
-                roster.ensure_email_free(session, registration, email, member.id)
-                changes["email"] = {"from": member.email_normalized, "to": email}
-                member.email_normalized = email
+            previous_email = member.email_normalized
+            if payload.email is not None and roster.change_email(session, registration, member, str(payload.email)):
+                changes["email"] = {"from": previous_email, "to": member.email_normalized}
             for field in ("full_name", "phone", "college"):
                 value = getattr(payload, field)
                 if value is not None and value != getattr(member, field):
@@ -266,6 +266,21 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
             payments.refresh_adjustment(session, registration, reason=roster.PRICE_CHANGED)
             audit(session, actor, "Admin edited team member", "registration", registration.id, member=member.email_normalized, changes=changes)
             return roster_saved(request, background, session, registration, "Your team details were updated")
+
+    @router.post("/teams/{registration_id}/leader")
+    def transfer_team_leadership(registration_id: UUID, payload: LeaderRequest, request: Request, background: BackgroundTasks,
+                                 authorization: str = Header()):
+        """Organisers hand a team to another member at any time; the new leader is emailed sign-in steps."""
+        session, actor = authenticated_user(request, authorization, public_key, TEAM_REVIEW_ROLES)
+        with session:
+            registration = team_for_roster(session, registration_id)
+            member = session.get(RegistrationMember, payload.member_id)
+            if member is None or member.registration_id != registration.id:
+                raise HTTPException(404, "member not found")
+            previous = roster.transfer_leadership(session, registration, member)
+            audit(session, actor, "Admin handed over team leadership", "registration", registration.id,
+                  new_leader=member.email_normalized, previous_leader=previous.email_normalized if previous else None)
+            return roster_saved(request, background, session, registration, f"{member.full_name} now leads your team")
 
     @router.delete("/teams/{registration_id}/members/{member_id}")
     def remove_team_member(registration_id: UUID, member_id: UUID, request: Request, background: BackgroundTasks,
