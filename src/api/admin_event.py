@@ -21,7 +21,7 @@ from src.db.models.registration import Announcement, AnnouncementRead, Registrat
 from src.db.models.stage import Track
 from src.events import stages as stage_rules
 from src.events.service import current_event, event_payload
-from src.payments.service import app_url
+from src.payments.service import app_url, refresh_adjustment
 from src.registrations.pricing import MAX_DISCOUNT_PAISE, MAX_DISCOUNT_PERCENT
 
 
@@ -148,6 +148,10 @@ def admin_event_router(public_key: Ed25519PublicKey) -> APIRouter:
                 if changes.keys() & STAGE_FIELDS.keys():
                     stage.updated_at, stage.updated_by_user_id = event.updated_at, actor.id
                 audit(session, actor, "Updated event control", "event", event.code, **changes)
+                if "payment_required" in changes:
+                    # Going free clears every balance still due (and its open order); going back to paid restores them.
+                    for registration in session.scalars(select(Registration).where(Registration.event_id == event.id, Registration.status == "PAID")):
+                        refresh_adjustment(session, registration)
                 session.commit()
                 request.app.state.cache.invalidate(PUBLIC_EVENT, ADMIN_AGGREGATES)
             return _event_admin_payload(session, event)
