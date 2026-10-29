@@ -51,3 +51,11 @@ def team_edits_close_at(event: Event) -> datetime | None:
 def team_edits_open(event: Event, now: datetime) -> bool:
     deadline = team_edits_close_at(event)
     return deadline is None or now < deadline
+
+
+def roster_edits_open(event: Event, now: datetime) -> bool:
+    """Leaders add or remove members only while registration is open, by date or by the organisers' switch.
+
+    Unlike detail fixes, a new roster is a new registration in all but name, so it closes with them.
+    """
+    return window_state(event, "registration", now) == "OPEN"

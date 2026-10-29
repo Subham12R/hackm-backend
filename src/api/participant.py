@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from src import realtime
 from src.api.deps import authenticated_user
-from src.api.registrations import _phone
+from src.api.registrations import NewMemberRequest, _phone
 from src.audit import audit
 from src.auth.policies import RoleCode
 from src.cache import ADMIN_AGGREGATES
@@ -44,10 +44,11 @@ from src.events import finals as finals_rules
 from src.events.service import current_event, event_payload
 from src.judging.service import criteria as judging_criteria
 from src.judging.service import released_snapshots
-from src.events.windows import team_edits_close_at, team_edits_open
+from src.events.windows import roster_edits_open, team_edits_close_at, team_edits_open
 from src.operations import team_code
 from src.payments import service as payments
 from src.payments.providers.razorpay import create_order
+from src.registrations import roster
 from src.submissions.codes import new_anonymous_code
 
 
@@ -195,6 +196,9 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 "unread_announcements": int(unread or 0),
                 "team_editable": team_edits_open(event, now),
                 "team_edits_close_at": _iso_or_none(team_edits_close_at(event)),
+                # Adding or removing members closes with registration; after that only organisers can.
+                "roster_editable": roster_edits_open(event, now),
+                "team_size": {"min": roster.MIN_MEMBERS, "max": roster.MAX_MEMBERS},
             }
 
     @router.patch("/team/members/{member_id}")
@@ -238,6 +242,47 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 "member": _member_payload(member),
                 "adjustment": {"status": registration.adjustment_status, "amount_minor": registration.adjustment_amount_minor},
             }
+
+    def roster_change(request: Request, background: BackgroundTasks, session: Session, user: User, registration: Registration,
+                      action: str, member: RegistrationMember) -> dict:
+        """Reprice, send the team back for review, and audit; the caller has already changed the roster."""
+        payments.refresh_adjustment(session, registration, reason=roster.PRICE_CHANGED)
+        was_reviewed = roster.reset_review(registration)
+        audit(session, user, f"Participant {action} team member", "registration", registration.id,
+              member=roster.member_snapshot(member), review_reset=was_reviewed)
+        session.commit()
+        request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+        background.add_task(dispatch_pending, request.app.state.database_url, request.app.state.email_sender)
+        members = payments.registration_members(session, registration.id)
+        return {
+            "members": [_member_payload(item) for item in members],
+            "verification": _verification(registration, members),
+            "adjustment": {"status": registration.adjustment_status, "amount_minor": registration.adjustment_amount_minor},
+        }
+
+    def open_roster(session: Session) -> None:
+        if not roster_edits_open(current_event(session), datetime.now(UTC)):
+            raise HTTPException(403, "registration has closed, so only the organisers can change your team now; contact support")
+
+    @router.post("/team/members", status_code=201)
+    def add_member(payload: NewMemberRequest, request: Request, background: BackgroundTasks, authorization: str = Header()):
+        session, user, registration = leader_registration(request, authorization, lock=True)
+        with session:
+            open_roster(session)
+            member = roster.add_member(session, registration, full_name=payload.full_name, email=str(payload.email), phone=payload.phone,
+                                       college=payload.college, is_acm_member=payload.is_acm_member, acm_id=payload.acm_id)
+            return roster_change(request, background, session, user, registration, "added", member)
+
+    @router.delete("/team/members/{member_id}")
+    def remove_member(member_id: UUID, request: Request, background: BackgroundTasks, authorization: str = Header()):
+        session, user, registration = leader_registration(request, authorization, lock=True)
+        with session:
+            open_roster(session)
+            member = session.get(RegistrationMember, member_id)
+            if member is None or member.registration_id != registration.id:
+                raise HTTPException(404, "member not found")
+            roster.remove_member(session, registration, member)
+            return roster_change(request, background, session, user, registration, "removed", member)
 
     @router.post("/rsvp")
     def rsvp(payload: RsvpAnswer, request: Request, authorization: str = Header()):

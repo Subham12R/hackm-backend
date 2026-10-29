@@ -72,6 +72,12 @@ class MemberRequest(BaseModel):
         return self
 
 
+class NewMemberRequest(MemberRequest):
+    """A member added to a registered team; the leader is fixed at registration."""
+
+    role: Literal["member"] = "member"
+
+
 class RegistrationRequest(BaseModel):
     team_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
     rules_consent: bool

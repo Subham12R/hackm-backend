@@ -5,12 +5,13 @@ from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import AfterValidator, BaseModel, EmailStr, Field, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from src import realtime
 from src.api.deps import authenticated_user
+from src.api.registrations import NewMemberRequest, _phone
 from src.audit import audit
 from src.auth.policies import ADMIN_READ_ROLES, MONEY_ROLES, TEAM_REVIEW_ROLES
 from src.cache import ADMIN_AGGREGATES
@@ -21,12 +22,21 @@ from src.db.models.registration import PaymentAttempt, PaymentOrder, Refund, Reg
 from src.operations import team_code
 from src.payments import service as payments
 from src.payments.providers.razorpay import create_refund
+from src.registrations import roster
 
 logger = logging.getLogger(__name__)
 
 
 class AcmReviewRequest(BaseModel):
     status: Literal["PENDING", "VERIFIED", "REJECTED"]
+
+
+class AdminMemberUpdate(BaseModel):
+    full_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)] | None = None
+    email: EmailStr | None = None
+    phone: Annotated[str, AfterValidator(_phone)] | None = None
+    college: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)] | None = None
+    acm_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)] | None = None
 
 
 class DismissRequest(BaseModel):
@@ -184,6 +194,93 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
                 request.app.state.cache.invalidate(ADMIN_AGGREGATES)
                 dispatch(request, background)
             return registration_detail_payload(session, registration)
+
+    def team_for_roster(session, registration_id: UUID) -> Registration:
+        registration = session.get(Registration, registration_id, with_for_update=True)
+        if registration is None:
+            raise HTTPException(404, "team not found")
+        if registration.status != "PAID":
+            raise HTTPException(409, "only registered teams can change members")
+        return registration
+
+    def roster_saved(request: Request, background: BackgroundTasks, session, registration: Registration, title: str) -> dict:
+        """Organiser roster edits need no re-review; the team's dashboard refreshes on its own."""
+        session.commit()
+        request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+        dispatch(request, background)
+        realtime.notify(request, realtime.team_channel(registration.id), realtime.message("team", title, "The organisers updated your team."))
+        return registration_detail_payload(session, registration)
+
+    @router.post("/teams/{registration_id}/members", status_code=201)
+    def add_team_member(registration_id: UUID, payload: NewMemberRequest, request: Request, background: BackgroundTasks,
+                        authorization: str = Header()):
+        """Organisers change rosters at any time, including after registration closes for leaders."""
+        session, actor = authenticated_user(request, authorization, public_key, TEAM_REVIEW_ROLES)
+        with session:
+            registration = team_for_roster(session, registration_id)
+            member = roster.add_member(session, registration, full_name=payload.full_name, email=str(payload.email), phone=payload.phone,
+                                       college=payload.college, is_acm_member=payload.is_acm_member, acm_id=payload.acm_id)
+            payments.refresh_adjustment(session, registration, reason=roster.PRICE_CHANGED)
+            audit(session, actor, "Admin added team member", "registration", registration.id, member=roster.member_snapshot(member))
+            return roster_saved(request, background, session, registration, f"{member.full_name} joined your team")
+
+    @router.patch("/teams/{registration_id}/members/{member_id}")
+    def update_team_member(registration_id: UUID, member_id: UUID, payload: AdminMemberUpdate, request: Request,
+                           background: BackgroundTasks, authorization: str = Header()):
+        session, actor = authenticated_user(request, authorization, public_key, TEAM_REVIEW_ROLES)
+        with session:
+            registration = team_for_roster(session, registration_id)
+            member = session.get(RegistrationMember, member_id)
+            if member is None or member.registration_id != registration.id:
+                raise HTTPException(404, "member not found")
+            changes: dict[str, dict[str, str | None]] = {}
+            if payload.email is not None and str(payload.email).lower() != member.email_normalized:
+                if member.role == "leader":
+                    raise HTTPException(409, "the leader's email is their sign-in; it cannot change here")
+                email = str(payload.email).lower()
+                roster.ensure_email_free(session, registration, email, member.id)
+                changes["email"] = {"from": member.email_normalized, "to": email}
+                member.email_normalized = email
+            for field in ("full_name", "phone", "college"):
+                value = getattr(payload, field)
+                if value is not None and value != getattr(member, field):
+                    changes[field] = {"from": getattr(member, field), "to": value}
+                    setattr(member, field, value)
+            if payload.acm_id is not None:
+                if not member.is_acm_member:
+                    raise HTTPException(409, "member did not claim ACM membership")
+                acm_id = payload.acm_id.upper()
+                if acm_id != member.acm_id:
+                    changes["acm_id"] = {"from": member.acm_id, "to": acm_id}
+                    member.acm_id = acm_id
+                    member.acm_review_status = "RECHECK" if member.acm_review_status in ("REJECTED", "RECHECK") else "PENDING"
+                    member.acm_reviewed_at = None
+                    member.acm_reviewed_by_user_id = None
+            if not changes:
+                return registration_detail_payload(session, registration)
+            if member.role == "leader" and "full_name" in changes:
+                leader = session.scalar(select(User).where(User.email_normalized == registration.leader_email))
+                if leader is not None:
+                    leader.display_name = member.full_name
+            session.flush()
+            payments.refresh_adjustment(session, registration, reason=roster.PRICE_CHANGED)
+            audit(session, actor, "Admin edited team member", "registration", registration.id, member=member.email_normalized, changes=changes)
+            return roster_saved(request, background, session, registration, "Your team details were updated")
+
+    @router.delete("/teams/{registration_id}/members/{member_id}")
+    def remove_team_member(registration_id: UUID, member_id: UUID, request: Request, background: BackgroundTasks,
+                           authorization: str = Header()):
+        session, actor = authenticated_user(request, authorization, public_key, TEAM_REVIEW_ROLES)
+        with session:
+            registration = team_for_roster(session, registration_id)
+            member = session.get(RegistrationMember, member_id)
+            if member is None or member.registration_id != registration.id:
+                raise HTTPException(404, "member not found")
+            snapshot = roster.member_snapshot(member)
+            roster.remove_member(session, registration, member)
+            payments.refresh_adjustment(session, registration, reason=roster.PRICE_CHANGED)
+            audit(session, actor, "Admin removed team member", "registration", registration.id, member=snapshot)
+            return roster_saved(request, background, session, registration, f"{snapshot['name']} left your team")
 
     @router.post("/registrations/{registration_id}/cancel")
     def cancel_pending(registration_id: UUID, request: Request, authorization: str = Header()):
