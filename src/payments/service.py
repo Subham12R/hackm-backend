@@ -22,6 +22,7 @@ from src.communications.templates import action_email
 from src.db.models.identity import AuditLog, Role, User, UserStatus
 from src.db.models.registration import (
     ActivationToken,
+    Event,
     PaymentAttempt,
     PaymentOrder,
     Refund,
@@ -287,6 +288,10 @@ def refresh_adjustment(session: Session, registration: Registration, notify: boo
     if registration.status != "PAID":
         return
     owed = (registration.effective_amount_minor or registration.quoted_amount_minor) - captured_total(session, registration.id)
+    event = session.get(Event, registration.event_id)
+    if event is not None and not event.payment_required:
+        # A free event bills no one: a team that paid earlier never owes a balance, whatever its ACM review says.
+        owed = 0
     adjustment_captured = session.scalar(
         select(PaymentOrder.id).where(
             PaymentOrder.registration_id == registration.id, PaymentOrder.purpose == ADJUSTMENT, PaymentOrder.status == "CAPTURED",
