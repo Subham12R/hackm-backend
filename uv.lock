@@ -517,6 +517,7 @@ dependencies = [
     { name = "cryptography" },
     { name = "email-validator" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "mistune" },
     { name = "pillow" },
     { name = "psycopg", extra = ["binary"] },
@@ -534,7 +535,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "fakeredis" },
-    { name = "httpx" },
     { name = "pytest" },
 ]
 
@@ -546,6 +546,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=50.0.1" },
     { name = "email-validator", specifier = ">=2.3.0" },
     { name = "fastapi", specifier = ">=0.141.1" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mistune", specifier = ">=3.1" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.6" },
@@ -563,7 +564,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "fakeredis", specifier = ">=2.26" },
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "pytest", specifier = ">=9.1.1" },
 ]
 

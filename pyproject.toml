@@ -11,6 +11,7 @@ dependencies = [
     "cryptography>=50.0.1",
     "email-validator>=2.3.0",
     "fastapi>=0.141.1",
+    "httpx>=0.28.1",
     "mistune>=3.1",
     "pillow>=12.3.0",
     "psycopg[binary]>=3.3.6",
@@ -31,6 +32,5 @@ pythonpath = ["."]
 [dependency-groups]
 dev = [
     "fakeredis>=2.26",
-    "httpx>=0.28.1",
     "pytest>=9.1.1",
 ]
