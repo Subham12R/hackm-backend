@@ -36,3 +36,4 @@ from src.db.models.contact import ContactMessage, ContactReply  # noqa: F401
 from src.db.models.media import EmailCampaign, GalleryPhoto, SiteNotice  # noqa: F401
 from src.db.models.stage import Stage, SubmissionAward, Track  # noqa: F401
 from src.db.models.credential import BadgeDefinition, CertificateType, Credential  # noqa: F401
+from src.db.models.instagram import InstagramToken  # noqa: F401

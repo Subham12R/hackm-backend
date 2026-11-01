@@ -42,6 +42,7 @@ from src.credentials.service import render_pending
 from src.registrations.unpaid import sweep_unpaid
 from src.api.middleware import request_id_middleware
 from src.config import Settings, decode_pem_env
+from src.instagram.feed import InstagramFeed
 from src.db.session import create_db_engine
 from src.realtime import notifier_from_env
 from src.storage.s3 import Storage, storage_from_env
@@ -84,6 +85,7 @@ def create_app(
     app.state.cache = cache_from_env()
     app.state.notifier = notifier or notifier_from_env()
     app.state.storage = storage or storage_from_env()
+    app.state.instagram = InstagramFeed(settings.database_url)
     app.state.database_url = settings.database_url
     app.state.razorpay_key_id = razorpay_key_id or os.getenv("RAZORPAY_KEY_ID")
     app.state.razorpay_webhook_secret = razorpay_webhook_secret or os.getenv("RAZORPAY_WEBHOOK_SECRET")

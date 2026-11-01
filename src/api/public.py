@@ -49,6 +49,12 @@ def site_notices(request: Request):
     return public_payload([row for row in request.app.state.cache.get_or_set(PUBLIC_NOTICES, "active", 300, produce) if row_is_live(row, now)])
 
 
+@router.get("/instagram")
+def public_instagram(request: Request):
+    """The HackMatrix Instagram profile and latest posts for the home page; empty until a token is set."""
+    return request.app.state.instagram.get()
+
+
 @router.get("/event")
 def public_event(request: Request):
     with _session(request) as session:

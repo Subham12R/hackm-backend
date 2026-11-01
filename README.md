@@ -181,6 +181,17 @@ R2 has no POST uploads, so for R2 (or any `S3_ENDPOINT_URL`) the API signs a PUT
 
 Without `S3_BUCKET` the API still runs; the public gallery is empty and uploads answer 503.
 
+## Instagram feed
+
+The home page shows the latest posts and reels from @hackmatrix_2k26 through `GET /api/v1/public/instagram`. It reads the Instagram API with Instagram Login, caches the result for 10 minutes (`INSTAGRAM_CACHE_SECONDS`), and serves the last good copy if Instagram is down. Without a token the endpoint answers `{"configured": false, ...}` and the site shows only the profile header and a Follow button.
+
+1. In the Instagram app, switch @hackmatrix_2k26 to a professional account (Creator or Business): Settings → Account type and tools → Switch to professional account. It is free and needs no Facebook Page.
+2. At developers.facebook.com, create an app, pick the "Manage messaging & content on Instagram" use case, and choose the Business app type.
+3. In the app, open Instagram → API setup with Instagram login → Generate access tokens → Add account, sign in as @hackmatrix_2k26, and allow `instagram_business_basic`. Copy the token it shows. The app can stay in Development mode because it only reads its own account.
+4. Set `INSTAGRAM_ACCESS_TOKEN` in the server `.env` and restart the container.
+
+The token lasts 60 days. The API refreshes it every 7 days (the first refresh runs once the token is a day old) and keeps the fresh copy in `instagram_tokens`, so the env var does not need rotating. To replace it, paste a new token into `.env`; a changed env token wins over the stored one.
+
 ## Deploy
 
 The image is `ghcr.io/subham12r/hackm-backend`. A push to `master` builds it and restarts the container on the VPS. Host ports `8000`, `8080`, `8082`, and `8091` are already taken, so nginx reaches this API at `127.0.0.1:8092`.
