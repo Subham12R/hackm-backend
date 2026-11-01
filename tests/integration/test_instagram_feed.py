@@ -75,7 +75,7 @@ def test_feed_is_empty_and_unconfigured_without_a_token(monkeypatch) -> None:
     harness = Harness()
     response = harness.client.get("/api/v1/public/instagram")
     assert response.status_code == 200
-    assert response.json() == {"configured": False, "profile": None, "posts": []}
+    assert response.json() == {"configured": False, "profile": None, "posts": [], "error": None}
 
 
 def test_feed_shapes_profile_reels_and_carousels(graph) -> None:
@@ -146,3 +146,18 @@ def test_pasting_a_new_env_token_replaces_the_stored_one(graph, monkeypatch) -> 
     harness.app.state.instagram._next_refresh_attempt = 0
     harness.client.get("/api/v1/public/instagram")
     assert graph.tokens("/me/media")[-1] == "new-seed"
+
+
+def test_a_broken_token_says_why_without_leaking_it(graph, monkeypatch) -> None:
+    graph.down = True
+    body = _harness(graph).client.get("/api/v1/public/instagram").json()
+    assert body["configured"] is True and body["posts"] == []
+    assert body["error"].startswith("Instagram answered 500: down")
+    assert "seed-token" not in body["error"]
+
+
+def test_a_facebook_token_is_called_out(graph, monkeypatch) -> None:
+    monkeypatch.setenv("INSTAGRAM_ACCESS_TOKEN", "EAAbc")
+    graph.down = True
+    body = _harness(graph).client.get("/api/v1/public/instagram").json()
+    assert "Facebook Login token" in body["error"]

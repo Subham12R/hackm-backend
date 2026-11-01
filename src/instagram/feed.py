@@ -36,8 +36,22 @@ REFRESH_EVERY = timedelta(days=7)
 REFRESH_RETRY_SECONDS = 3600
 
 
-def empty(configured: bool) -> dict:
-    return {"configured": configured, "profile": None, "posts": []}
+def empty(configured: bool, error: str | None = None) -> dict:
+    return {"configured": configured, "profile": None, "posts": [], "error": error}
+
+
+def describe(error: Exception, token: str) -> str:
+    """A short, token-free reason the feed is empty, so whoever set the token can see what Instagram said."""
+
+    if token.startswith("EAA"):
+        return "This is a Facebook Login token. Generate one under Instagram > API setup with Instagram login (it starts with IG)."
+    if isinstance(error, httpx.HTTPStatusError):
+        try:
+            message = error.response.json().get("error", {}).get("message") or ""
+        except ValueError:
+            message = ""
+        return f"Instagram answered {error.response.status_code}: {message or error.response.reason_phrase}"[:300]
+    return f"Could not reach Instagram ({type(error).__name__})."
 
 
 def _seed_hash(token: str) -> str:
@@ -99,7 +113,7 @@ def fetch_feed(client: httpx.Client, token: str) -> dict:
     profile = _profile(client, token)
     media = _get(client, "/me/media", {"fields": MEDIA_FIELDS, "limit": POST_LIMIT, "access_token": token})
     posts = [post for post in (_post(item) for item in media.get("data") or []) if post]
-    return {"configured": True, "profile": profile, "posts": posts}
+    return {"configured": True, "profile": profile, "posts": posts, "error": None}
 
 
 class InstagramFeed:
@@ -165,7 +179,8 @@ class InstagramFeed:
             try:
                 self._good = fetch_feed(self.client, token)
                 self._value, self._expires = self._good, time.monotonic() + CACHE_SECONDS
-            except Exception:
+            except Exception as error:
                 logger.warning("instagram feed fetch failed", exc_info=True)
-                self._value, self._expires = self._good or empty(True), time.monotonic() + ERROR_CACHE_SECONDS
+                self._value = self._good or empty(True, describe(error, token))
+                self._expires = time.monotonic() + ERROR_CACHE_SECONDS
             return self._value
