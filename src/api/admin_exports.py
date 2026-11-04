@@ -24,8 +24,8 @@ class ExportRequest(BaseModel):
     dataset: Literal[tuple(DATASETS)]  # type: ignore[valid-type]
     fields: list[Annotated[str, StringConstraints(max_length=40)]] = Field(default_factory=list, max_length=60)
     scope: Literal["SELECTED", "FILTERED", "ALL"] = "FILTERED"
-    # The table's own filters: search, status, category, finals, stage_id, track_id, round_id.
-    filters: dict[Literal["search", "status", "category", "finals", "stage_id", "track_id", "round_id"], FilterValue] = Field(default_factory=dict)
+    # The table's own filters: search, status, category, finals, review, stage_id, track_id, round_id.
+    filters: dict[Literal["search", "status", "category", "finals", "review", "stage_id", "track_id", "round_id"], FilterValue] = Field(default_factory=dict)
     ids: list[UUID] = Field(default_factory=list, max_length=5000)
 
     @model_validator(mode="after")

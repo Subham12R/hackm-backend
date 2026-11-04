@@ -14,7 +14,7 @@ from uuid import UUID
 from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
 
-from src.api.search import contains, needle, submission_search, team_search
+from src.api.search import contains, needle, review_filter, submission_search, team_search
 from src.db.models.contact import ContactMessage
 from src.db.models.identity import User
 from src.db.models.judging import (
@@ -84,7 +84,7 @@ def _rosters(session: Session, registration_ids) -> dict:
 
 
 def _registration_filters(filters: dict) -> list:
-    """The Registrations / Teams table filters (search, status, category, finals)."""
+    """The Registrations / Teams table filters (search, status, category, finals, review)."""
     conditions = [Registration.event_id == ACTIVE_EVENT_ID]
     status = filters.get("status")
     if not status:
@@ -95,6 +95,8 @@ def _registration_filters(filters: dict) -> list:
         conditions.append(Registration.category == filters["category"])
     if filters.get("finals"):
         conditions.append(Registration.finals_status == filters["finals"])
+    if filters.get("review") in ("PENDING", "VERIFIED", "DECLINED"):
+        conditions.extend(review_filter(filters["review"]))
     matched = team_search(filters.get("search"))
     if matched is not None:
         conditions.append(matched)
