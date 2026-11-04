@@ -68,6 +68,16 @@ class AutoAssignRequest(BaseModel):
     judge_emails: list[str] | None = None
 
 
+class BulkAssignmentRequest(BaseModel):
+    """Assign or remove judges on many teams in one go (the Submissions table's bulk bar)."""
+    registration_ids: list[UUID] = Field(min_length=1, max_length=500)
+    judge_emails: list[str] = Field(min_length=1, max_length=50)
+    # ADD: every chosen judge on every team. SPREAD: `per_team` judges per team from the pool, least-loaded first.
+    # REMOVE: take the chosen judges off the teams (a submitted scorecard blocks that pair).
+    mode: Literal["ADD", "SPREAD", "REMOVE"] = "ADD"
+    per_team: int = Field(default=1, ge=1, le=10)
+
+
 class EntriesRequest(BaseModel):
     registration_ids: list[UUID] = Field(min_length=1, max_length=500)
 
@@ -190,9 +200,11 @@ def admin_judging_router(public_key: Ed25519PublicKey) -> APIRouter:
                 raise HTTPException(409, "the round is closed")
             if not judging.is_eligible(session, round_, payload.registration_id):
                 raise HTTPException(409, "this team is not eligible for the round")
+            existing = _existing_pairs(session, round_.id, [payload.registration_id])
             added = []
             for judge in _active_judges(session, payload.judge_emails):
-                if _ensure_assignment(session, round_, payload.registration_id, judge, actor):
+                if (payload.registration_id, judge.id) not in existing:
+                    session.add(_assignment(round_, payload.registration_id, judge, actor))
                     added.append(judge.display_name)
             if added:
                 audit(session, actor, "Assigned evaluator", "submission", team_code(payload.registration_id), assignee=", ".join(added), round=round_.name)
@@ -242,7 +254,7 @@ def admin_judging_router(public_key: Ed25519PublicKey) -> APIRouter:
                     if not candidates:
                         break
                     judge = min(candidates, key=lambda item: (load[item.id], item.email_normalized))
-                    _ensure_assignment(session, round_, registration.id, judge, actor)
+                    session.add(_assignment(round_, registration.id, judge, actor))
                     current.add(judge.id)
                     load[judge.id] += 1
                     created += 1
@@ -250,6 +262,71 @@ def admin_judging_router(public_key: Ed25519PublicKey) -> APIRouter:
             session.commit()
             request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             return {"created": created}
+
+    @router.post("/rounds/{round_id}/assignments/bulk")
+    def bulk_assignments(round_id: UUID, payload: BulkAssignmentRequest, request: Request, authorization: str = Header()):
+        """One transaction for the whole selection; a team that can't take the change is skipped with a reason."""
+        session, actor = authenticated_user(request, authorization, public_key, ASSIGNMENT_ROLES)
+        with session:
+            round_ = load_round(session, round_id, lock=True)
+            if round_.status == "CLOSED":
+                raise HTTPException(409, "the round is closed")
+            if payload.mode == "SPREAD" and payload.per_team > len({email.strip().lower() for email in payload.judge_emails}):
+                raise HTTPException(409, "pick at least as many judges as you want per team")
+            judges = _active_judges(session, payload.judge_emails)
+            wanted = list(dict.fromkeys(payload.registration_ids))
+            eligible = judging.eligible_ids(session, round_, wanted)
+            names = dict(session.execute(select(Registration.id, Registration.team_name).where(Registration.id.in_(wanted))).all())
+            skipped = [{"registration_id": str(item), "team_name": names.get(item), "reason": "not eligible for this round"}
+                       for item in wanted if item not in eligible]
+            targets = [item for item in wanted if item in eligible]
+            changed = 0
+            if payload.mode == "REMOVE":
+                chosen = {judge.id: judge for judge in judges}
+                for assignment, card_status in session.execute(
+                    select(EvaluationAssignment, Scorecard.status)
+                    .outerjoin(Scorecard, Scorecard.assignment_id == EvaluationAssignment.id)
+                    .where(EvaluationAssignment.round_id == round_.id, EvaluationAssignment.registration_id.in_(targets),
+                           EvaluationAssignment.judge_user_id.in_(list(chosen)))
+                ).tuples():
+                    if card_status == "SUBMITTED":
+                        skipped.append({"registration_id": str(assignment.registration_id), "team_name": names.get(assignment.registration_id),
+                                        "reason": f"{chosen[assignment.judge_user_id].display_name} already submitted a scorecard"})
+                        continue
+                    session.delete(assignment)
+                    changed += 1
+                action = "Removed evaluators in bulk"
+            else:
+                existing = _existing_pairs(session, round_.id, targets)
+                if payload.mode == "ADD":
+                    for registration_id in targets:
+                        for judge in judges:
+                            if (registration_id, judge.id) not in existing:
+                                session.add(_assignment(round_, registration_id, judge, actor))
+                                changed += 1
+                else:
+                    load = {judge.id: 0 for judge in judges}
+                    for judge_id, count in session.execute(
+                        select(EvaluationAssignment.judge_user_id, func.count(EvaluationAssignment.id))
+                        .where(EvaluationAssignment.round_id == round_.id, EvaluationAssignment.judge_user_id.in_(list(load)))
+                        .group_by(EvaluationAssignment.judge_user_id)
+                    ).all():
+                        load[judge_id] = int(count)
+                    pool_ids = set(load)
+                    for registration_id in targets:
+                        current = {judge_id for team, judge_id in existing if team == registration_id and judge_id in pool_ids}
+                        while len(current) < payload.per_team:
+                            judge = min((item for item in judges if item.id not in current), key=lambda item: (load[item.id], item.email_normalized))
+                            session.add(_assignment(round_, registration_id, judge, actor))
+                            current.add(judge.id)
+                            load[judge.id] += 1
+                            changed += 1
+                action = "Assigned evaluators in bulk"
+            audit(session, actor, action, "round", round_.id, mode=payload.mode, teams=len(targets), changed=changed,
+                  judges=", ".join(judge.display_name for judge in judges))
+            session.commit()
+            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            return {"mode": payload.mode, "changed": changed, "teams": len(targets), "skipped": skipped}
 
     @router.post("/rounds/{round_id}/entries")
     def add_entries(round_id: UUID, payload: EntriesRequest, request: Request, authorization: str = Header()):
@@ -380,15 +457,18 @@ def _active_judges(session, emails: list[str]) -> list[User]:
     return judges
 
 
-def _ensure_assignment(session, round_: EvaluationRound, registration_id, judge: User, actor: User) -> bool:
-    exists = session.scalar(select(EvaluationAssignment.id).where(
-        EvaluationAssignment.round_id == round_.id, EvaluationAssignment.registration_id == registration_id, EvaluationAssignment.judge_user_id == judge.id,
-    ))
-    if exists is not None:
-        return False
-    session.add(EvaluationAssignment(round_id=round_.id, registration_id=registration_id, judge_user_id=judge.id, assigned_by_user_id=actor.id))
-    session.flush()
-    return True
+def _existing_pairs(session, round_id, registration_ids) -> set[tuple]:
+    """(registration id, judge id) pairs already assigned in the round, for the given teams, in one query."""
+    if not registration_ids:
+        return set()
+    return set(session.execute(
+        select(EvaluationAssignment.registration_id, EvaluationAssignment.judge_user_id)
+        .where(EvaluationAssignment.round_id == round_id, EvaluationAssignment.registration_id.in_(list(registration_ids)))
+    ).tuples())
+
+
+def _assignment(round_: EvaluationRound, registration_id, judge: User, actor: User) -> EvaluationAssignment:
+    return EvaluationAssignment(round_id=round_.id, registration_id=registration_id, judge_user_id=judge.id, assigned_by_user_id=actor.id)
 
 
 def _round_summary(session, round_: EvaluationRound) -> dict:

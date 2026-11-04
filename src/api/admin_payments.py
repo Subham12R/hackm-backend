@@ -4,14 +4,15 @@ from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request
 from pydantic import AfterValidator, BaseModel, EmailStr, Field, StringConstraints
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
 from src import realtime
 from src.api.deps import authenticated_user
 from src.api.registrations import NewMemberRequest, _phone
+from src.api.search import contains, needle, team_search
 from src.audit import audit
 from src.auth.policies import ADMIN_READ_ROLES, MONEY_ROLES, TEAM_REVIEW_ROLES
 from src.cache import ADMIN_AGGREGATES
@@ -157,18 +158,27 @@ def admin_payments_router(public_key: Ed25519PublicKey) -> APIRouter:
             return registration_detail_payload(session, registration)
 
     @router.get("/payments/review")
-    def payments_needing_review(request: Request, authorization: str = Header()):
+    def payments_needing_review(request: Request, authorization: str = Header(), search: str | None = Query(None, max_length=100)):
         session, _user = authenticated_user(request, authorization, public_key, ADMIN_READ_ROLES)
         with session:
-            attempts = session.scalars(
-                select(PaymentAttempt).where(PaymentAttempt.status == "NEEDS_REVIEW").order_by(PaymentAttempt.created_at.desc()).limit(200)
-            ).all()
+            query = (
+                select(PaymentAttempt, Registration)
+                .outerjoin(PaymentOrder, PaymentOrder.id == PaymentAttempt.order_id)
+                .outerjoin(Registration, Registration.id == PaymentOrder.registration_id)
+                .where(PaymentAttempt.status == "NEEDS_REVIEW")
+                .order_by(PaymentAttempt.created_at.desc()).limit(200)
+            )
+            term = needle(search)
+            if term:
+                query = query.where(or_(
+                    team_search(term), contains(PaymentAttempt.provider_payment_id, term), contains(PaymentAttempt.provider_order_id, term),
+                ))
+            pairs = session.execute(query).tuples().all()
+            committed = payments.committed_refunds(session, [attempt.id for attempt, _registration in pairs])
             rows = []
-            for attempt in attempts:
-                order = session.get(PaymentOrder, attempt.order_id) if attempt.order_id else None
-                registration = session.get(Registration, order.registration_id) if order else None
+            for attempt, registration in pairs:
                 rows.append({
-                    **_attempt_payload(session, attempt),
+                    **_attempt_payload(session, attempt, committed),
                     "registration_id": str(registration.id) if registration else None,
                     "team_name": registration.team_name if registration else None,
                     "leader_email": registration.leader_email if registration else None,
@@ -566,6 +576,10 @@ def registration_detail_payload(session, registration: Registration) -> dict:
     order_ids = [order.id for order in orders]
     attempts = session.scalars(select(PaymentAttempt).where(PaymentAttempt.order_id.in_(order_ids)).order_by(PaymentAttempt.created_at)).all() if order_ids else []
     refunds = session.scalars(select(Refund).where(Refund.registration_id == registration.id).order_by(Refund.created_at)).all()
+    committed: dict = {}
+    for refund in refunds:
+        if refund.status != "FAILED":
+            committed[refund.payment_attempt_id] = committed.get(refund.payment_attempt_id, 0) + refund.amount_minor
     reviewer_ids = {member.acm_reviewed_by_user_id for member in members if member.acm_reviewed_by_user_id}
     reviewers = {user.id: user.display_name for user in session.scalars(select(User).where(User.id.in_(reviewer_ids)))} if reviewer_ids else {}
     return {
@@ -600,18 +614,23 @@ def registration_detail_payload(session, registration: Registration) -> dict:
              "currency": order.currency, "status": order.status, "created_at": order.created_at.isoformat()}
             for order in orders
         ],
-        "payments": [_attempt_payload(session, attempt) for attempt in attempts],
+        "payments": [_attempt_payload(session, attempt, committed) for attempt in attempts],
         "refunds": [_refund_payload(refund) for refund in refunds],
     }
 
 
-def _attempt_payload(session, attempt: PaymentAttempt) -> dict:
+def _attempt_payload(session, attempt: PaymentAttempt, committed: dict | None = None) -> dict:
+    """`committed` (attempt id -> refunds not failed) lets list endpoints load refund totals in one query."""
+    if attempt.status in ("CAPTURED", "NEEDS_REVIEW"):
+        refundable = attempt.amount_minor - committed.get(attempt.id, 0) if committed is not None else payments.refundable_amount(session, attempt)
+    else:
+        refundable = 0
     return {
         "id": str(attempt.id), "provider_payment_id": attempt.provider_payment_id, "provider_order_id": attempt.provider_order_id,
         "amount_minor": attempt.amount_minor, "currency": attempt.currency, "status": attempt.status,
         "review_reason": attempt.review_reason, "method": attempt.method, "error_code": attempt.error_code,
         "error_description": attempt.error_description, "created_at": attempt.created_at.isoformat(),
-        "refundable_minor": payments.refundable_amount(session, attempt) if attempt.status in ("CAPTURED", "NEEDS_REVIEW") else 0,
+        "refundable_minor": refundable,
     }
 
 

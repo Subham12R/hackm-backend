@@ -9,6 +9,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import selectinload
 
 from src.api.deps import authenticated_user
+from src.api.search import contains, needle
 from src.audit import audit
 from src.auth.owner import is_owner_email
 from src.auth.policies import ADMIN_PORTAL_ROLES, ADMIN_READ_ROLES, SUPPORT_ROLES, RoleCode
@@ -51,6 +52,7 @@ def admin_ops_router(public_key: Ed25519PublicKey) -> APIRouter:
         status: Literal["NEW", "OPEN", "RESOLVED", "SPAM", "ACTIVE"] | None = "ACTIVE",
         page: int = Query(1, ge=1),
         page_size: int = Query(20, ge=1, le=100),
+        search: str | None = Query(None, max_length=100),
     ):
         session, _user = authenticated_user(request, authorization, public_key, ADMIN_READ_ROLES)
         with session:
@@ -59,6 +61,9 @@ def admin_ops_router(public_key: Ed25519PublicKey) -> APIRouter:
                 filters.append(ContactMessage.status.in_(("NEW", "OPEN")))
             elif status:
                 filters.append(ContactMessage.status == status)
+            term = needle(search)
+            if term:
+                filters.append(contains(ContactMessage.name, term) | contains(ContactMessage.email, term) | contains(ContactMessage.subject, term))
             total = session.scalar(select(func.count(ContactMessage.id)).where(*filters)) or 0
             messages = session.scalars(
                 select(ContactMessage).where(*filters).order_by(ContactMessage.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
@@ -234,11 +239,14 @@ def admin_ops_router(public_key: Ed25519PublicKey) -> APIRouter:
                     select(Submission.status, func.count(Submission.id)).join(Registration, Registration.id == Submission.registration_id)
                     .where(Registration.status == "PAID").group_by(Submission.status)
                 ).all())
-                rounds = []
-                for round_ in session.scalars(select(EvaluationRound).order_by(EvaluationRound.sequence)):
-                    assigned = session.scalar(select(func.count(EvaluationAssignment.id)).where(EvaluationAssignment.round_id == round_.id)) or 0
-                    done = session.scalar(select(func.count(Scorecard.id)).where(Scorecard.round_id == round_.id, Scorecard.status == "SUBMITTED")) or 0
-                    rounds.append({"name": round_.name, "status": round_.status, "assigned": int(assigned), "submitted": int(done)})
+                assigned_by_round = select(func.count(EvaluationAssignment.id)).where(EvaluationAssignment.round_id == EvaluationRound.id).scalar_subquery()
+                done_by_round = select(func.count(Scorecard.id)).where(Scorecard.round_id == EvaluationRound.id, Scorecard.status == "SUBMITTED").scalar_subquery()
+                rounds = [
+                    {"name": name, "status": status, "assigned": int(assigned or 0), "submitted": int(done or 0)}
+                    for name, status, assigned, done in session.execute(
+                        select(EvaluationRound.name, EvaluationRound.status, assigned_by_round, done_by_round).order_by(EvaluationRound.sequence)
+                    ).all()
+                ]
                 members = session.scalar(
                     select(func.count(RegistrationMember.id)).join(Registration, Registration.id == RegistrationMember.registration_id).where(Registration.status == "PAID")
                 ) or 0
