@@ -135,7 +135,14 @@ def admin_emails_router(public_key: Ed25519PublicKey) -> APIRouter:
             by_source: dict[str, int] = {}
             for person in people:
                 by_source[person["source"]] = by_source.get(person["source"], 0) + 1
-            return {"count": len(people), "by_source": by_source, "sample": people[:50], "max": audiences.MAX_RECIPIENTS}
+            teams = session.execute(
+                select(Registration.id, Registration.team_name, Registration.status).where(Registration.id.in_(payload.team_ids))
+            ).all() if payload.team_ids else []
+            return {
+                "count": len(people), "by_source": by_source, "sample": people[:50], "max": audiences.MAX_RECIPIENTS,
+                # Names for the picked-team chips, so a reopened draft shows them.
+                "teams": [{"registration_id": str(team_id), "team_name": name, "status": status} for team_id, name, status in teams],
+            }
 
     @router.get("/people")
     def find_people(request: Request, authorization: str = Header(), q: str = Query("", max_length=100)):

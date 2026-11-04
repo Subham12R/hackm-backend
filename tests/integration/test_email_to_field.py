@@ -42,6 +42,7 @@ def test_to_field_mixes_a_segment_picked_teams_and_typed_people() -> None:
     preview = harness.client.post(f"{BASE}/recipients", headers=viewer, json=to_field).json()
     assert preview["count"] == 4
     assert preview["by_source"] == {"TEAM": 2, "CUSTOM": 2}
+    assert [team["team_name"] for team in preview["teams"]] == [f"Lark {tag}"]
     assert next(item for item in preview["sample"] if item["email"] == custom)["first_name"] == f"sponsor-{tag}"
 
     campaign = harness.client.post(BASE, headers=admin, json=_draft(**to_field))
