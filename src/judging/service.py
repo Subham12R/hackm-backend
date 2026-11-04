@@ -60,20 +60,34 @@ def create_round(session: Session, name: str, scope: str, min_evaluations: int, 
     return round_
 
 
-def eligible_registrations(session: Session, round_: EvaluationRound) -> list[tuple[Registration, Submission]]:
-    """Paid teams with a finalized submission in the round's stage, limited to the shortlist for SHORTLIST rounds."""
+def _eligible_query(round_: EvaluationRound, *columns):
     query = (
-        select(Registration, Submission)
+        select(*columns)
+        .select_from(Registration)
         .join(Submission, (Submission.registration_id == Registration.id) & (Submission.stage_id == round_.stage_id))
         .where(Registration.event_id == round_.event_id, Registration.status == "PAID", Submission.status == "SUBMITTED")
     )
     if round_.scope == "SHORTLIST":
         query = query.join(RoundEntry, (RoundEntry.registration_id == Registration.id) & (RoundEntry.round_id == round_.id))
+    return query
+
+
+def eligible_registrations(session: Session, round_: EvaluationRound) -> list[tuple[Registration, Submission]]:
+    """Paid teams with a finalized submission in the round's stage, limited to the shortlist for SHORTLIST rounds."""
+    query = _eligible_query(round_, Registration, Submission)
     return list(session.execute(query.order_by(Submission.submitted_at, Submission.anonymous_code)).tuples())
 
 
+def eligible_ids(session: Session, round_: EvaluationRound, registration_ids=None) -> set:
+    """The eligible registration ids, optionally only among `registration_ids`, in one query."""
+    query = _eligible_query(round_, Registration.id)
+    if registration_ids is not None:
+        query = query.where(Registration.id.in_(list(registration_ids)))
+    return set(session.scalars(query))
+
+
 def is_eligible(session: Session, round_: EvaluationRound, registration_id) -> bool:
-    return any(registration.id == registration_id for registration, _submission in eligible_registrations(session, round_))
+    return registration_id in eligible_ids(session, round_, [registration_id])
 
 
 def validate_scores(rubric: list[EvaluationCriterion], scores: dict[str, int], complete: bool) -> dict[str, int]:

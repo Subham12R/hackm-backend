@@ -323,6 +323,16 @@ def refresh_adjustment(session: Session, registration: Registration, notify: boo
             order.status = "CANCELLED"
 
 
+def committed_refunds(session: Session, attempt_ids: list) -> dict:
+    """Refunds not failed, per payment attempt, in one query (see refundable_amount)."""
+    if not attempt_ids:
+        return {}
+    return {attempt_id: int(total) for attempt_id, total in session.execute(
+        select(Refund.payment_attempt_id, func.coalesce(func.sum(Refund.amount_minor), 0))
+        .where(Refund.payment_attempt_id.in_(attempt_ids), Refund.status != "FAILED").group_by(Refund.payment_attempt_id)
+    ).all()}
+
+
 def refundable_amount(session: Session, attempt: PaymentAttempt) -> int:
     committed = session.scalar(
         select(func.coalesce(func.sum(Refund.amount_minor), 0)).where(Refund.payment_attempt_id == attempt.id, Refund.status != "FAILED")

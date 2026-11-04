@@ -42,11 +42,16 @@ def release(session: Session, event: Event, now: datetime) -> tuple[dict[str, in
     """Email every decided team whose decision changed since it was last told; returns counts and (team id, decision) pairs."""
     counts = {"ACCEPTED": 0, "DECLINED": 0, "emails": 0}
     released: list[tuple[str, str]] = []
-    for registration in unreleased(session, event.id):
-        members = list(session.scalars(
-            select(RegistrationMember).where(RegistrationMember.registration_id == registration.id)
+    teams = unreleased(session, event.id)
+    rosters: dict = {}
+    if teams:
+        for member in session.scalars(
+            select(RegistrationMember).where(RegistrationMember.registration_id.in_([team.id for team in teams]))
             .order_by(RegistrationMember.role.desc(), RegistrationMember.full_name)
-        ))
+        ):
+            rosters.setdefault(member.registration_id, []).append(member)
+    for registration in teams:
+        members = rosters.get(registration.id, [])
         token = None
         if registration.finals_status == "ACCEPTED":
             token = token_urlsafe(32)

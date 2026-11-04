@@ -19,6 +19,7 @@ from src.api.admin import admin_router
 from src.api.admin_checkin import admin_checkin_router
 from src.api.admin_credentials import admin_credentials_router
 from src.api.admin_emails import admin_emails_router
+from src.api.admin_exports import admin_exports_router
 from src.api.admin_owner import admin_owner_router
 from src.api.admin_stages import admin_stages_router
 from src.api.admin_event import admin_event_router
@@ -147,6 +148,7 @@ def create_app(
         app.include_router(admin_invites_router(public_key))
         app.include_router(admin_site_notices_router(public_key))
         app.include_router(admin_emails_router(public_key))
+        app.include_router(admin_exports_router(public_key))
         app.include_router(admin_owner_router(public_key))
         app.include_router(admin_checkin_router(public_key))
         app.include_router(admin_stages_router(public_key))

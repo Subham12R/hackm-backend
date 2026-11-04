@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from src import realtime
 from src.api.deps import authenticated_user
@@ -210,14 +210,16 @@ def finals_payload(registration: Registration, decided_by: str | None) -> dict:
 def _set_checkin(session, registration: Registration, members: list[RegistrationMember], checked_in: bool, actor: User) -> int:
     """Idempotently mark or unmark members; returns how many actually changed."""
     existing = set(session.scalars(select(MemberCheckin.member_id).where(MemberCheckin.member_id.in_([member.id for member in members]))))
-    changed = 0
     now = datetime.now(UTC)
+    if not checked_in:
+        leaving = [member.id for member in members if member.id in existing]
+        if leaving:
+            session.execute(delete(MemberCheckin).where(MemberCheckin.member_id.in_(leaving)))
+        return len(leaving)
+    changed = 0
     for member in members:
-        if checked_in and member.id not in existing:
+        if member.id not in existing:
             session.add(MemberCheckin(member_id=member.id, registration_id=registration.id, checked_in_at=now, checked_in_by_user_id=actor.id))
-            changed += 1
-        elif not checked_in and member.id in existing:
-            session.delete(session.get(MemberCheckin, member.id))
             changed += 1
     return changed
 

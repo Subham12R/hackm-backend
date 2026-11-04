@@ -40,7 +40,13 @@ def judge_router(public_key: Ed25519PublicKey) -> APIRouter:
                 .where(EvaluationAssignment.judge_user_id == user.id)
                 .order_by(EvaluationRound.sequence, Submission.anonymous_code)
             ).tuples().all()
-            return {"items": [_assignment_payload(session, *row, detail=False) for row in rows]}
+            rubrics: dict = {}
+            items = []
+            for assignment, round_, submission, card in rows:
+                if round_.id not in rubrics:
+                    rubrics[round_.id] = judging.criteria(session, round_.id)
+                items.append(_assignment_payload(session, assignment, round_, submission, card, detail=False, rubric=rubrics[round_.id]))
+            return {"items": items}
 
     @router.get("/assignments/{assignment_id}")
     def assignment(assignment_id: UUID, request: Request, authorization: str = Header()):
@@ -111,8 +117,9 @@ def _writable(session, assignment, round_: EvaluationRound, card: Scorecard | No
     return card
 
 
-def _assignment_payload(session, assignment, round_: EvaluationRound, submission: Submission, card: Scorecard | None, detail: bool) -> dict:
-    rubric = judging.criteria(session, round_.id)
+def _assignment_payload(session, assignment, round_: EvaluationRound, submission: Submission, card: Scorecard | None, detail: bool,
+                        rubric: list | None = None) -> dict:
+    rubric = rubric if rubric is not None else judging.criteria(session, round_.id)
     payload = {
         "assignment_id": str(assignment.id),
         "code": submission.anonymous_code,

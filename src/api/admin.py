@@ -5,20 +5,25 @@ from uuid import UUID
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, exists, func, literal, select
 from sqlalchemy.orm import Session
 
 from src import realtime
-from src.api.deps import authenticated_user
+from src.api.deps import authenticated_user, role_codes
+from src.api.search import submission_search, team_search
 from src.audit import audit
 from src.auth.policies import (
+    ADMIN_PORTAL_ROLES,
     ADMIN_READ_ROLES,
     ASSIGNMENT_ROLES,
     EVENT_CONTROL_ROLES,
+    MONEY_ROLES,
+    SUPPORT_ROLES,
     TEAM_REVIEW_ROLES,
     RoleCode,
 )
 from src.cache import ADMIN_AGGREGATES
+from src.db.models.contact import ContactMessage
 from src.db.models.identity import AuditLog, Role, User, UserStatus
 from src.db.models.judging import EvaluationAssignment, EvaluationRound, Scorecard
 from src.db.models.registration import (
@@ -93,6 +98,18 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
             data = request.app.state.cache.get_or_set(ADMIN_AGGREGATES, "overview", 30, produce)
             return {"viewer_name": user.display_name, **data}
 
+    @router.get("/attention")
+    def attention(request: Request, authorization: str = Header()):
+        """Work waiting on staff, for the sidebar pills: only the counts the caller's roles can act on, in one SELECT."""
+        session, user = admin_user(request, authorization, ADMIN_PORTAL_ROLES)
+        with session:
+            roles = role_codes(user)
+            counts = {key: subquery for key, allowed, subquery in _attention_counts(user.id) if roles & allowed}
+            if not counts:
+                return {"counts": {}}
+            row = session.execute(select(*(subquery.label(key) for key, subquery in counts.items()))).one()
+            return {"counts": {key: int(getattr(row, key) or 0) for key in counts}}
+
     @router.get("/registrations")
     def list_registrations(
         request: Request,
@@ -128,6 +145,26 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
             rows, total, daily = _page(session, timezone, registered_on, category, status, search, page, page_size, finals)
             return {"items": _team_rows(session, rows, timezone), "total": total, "page": page, "page_size": page_size, "daily_counts": daily}
 
+    @router.get("/teams/ids")
+    def matching_team_ids(
+        request: Request,
+        authorization: str = Header(),
+        registered_on: date | None = Query(None, alias="date"),
+        category: RegistrationCategory | None = None,
+        status: Literal["PAYMENT_PENDING", "PAID", "REFUNDED", "ABANDONED", "REJECTED", "ALL"] | None = None,
+        search: str | None = Query(None, max_length=100),
+        finals: Literal["PENDING", "ACCEPTED", "DECLINED"] | None = None,
+    ):
+        """Every registration id matching the table filters (all pages), for "Email all matching"."""
+        session, _user = admin_user(request, authorization)
+        with session:
+            timezone = current_event(session).timezone
+            ids = session.scalars(
+                select(Registration.id).where(*_list_filters(registered_on, category, status, search, finals, timezone))
+                .order_by(Registration.created_at.desc()).limit(2001)
+            ).all()
+            return {"ids": [str(item) for item in ids[:2000]], "truncated": len(ids) > 2000}
+
     @router.post("/teams/{registration_id}/review")
     def review_team(registration_id: UUID, payload: TeamReviewRequest, request: Request, authorization: str = Header()):
         session, actor = admin_user(request, authorization, TEAM_REVIEW_ROLES)
@@ -162,6 +199,7 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
         authorization: str = Header(),
         stage_id: UUID | None = None,
         track_id: UUID | None = None,
+        search: str | None = Query(None, max_length=100),
     ):
         session, _user = admin_user(request, authorization)
         with session:
@@ -179,6 +217,9 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
                 query = query.where(Registration.finals_status == "ACCEPTED")
             if track_id is not None:
                 query = query.where(Submission.track_id == track_id)
+            matched = submission_search(search)
+            if matched is not None:
+                query = query.where(matched)
             pairs = session.execute(query.order_by(Registration.created_at.desc())).tuples().all()
             assignments: dict = {}
             submitted_cards: dict = {}
@@ -288,19 +329,24 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
             return {"status": submission.status}
 
     @router.get("/evaluations")
-    def list_evaluations(request: Request, authorization: str = Header()):
+    def list_evaluations(request: Request, authorization: str = Header(), search: str | None = Query(None, max_length=100)):
         session, _user = admin_user(request, authorization)
         with session:
             rubrics: dict = {}
             rows = []
-            for card, round_, judge, registration in session.execute(
-                select(Scorecard, EvaluationRound, User, Registration)
+            query = (
+                select(Scorecard, EvaluationRound, User, Registration, Submission.anonymous_code)
                 .join(EvaluationRound, EvaluationRound.id == Scorecard.round_id)
                 .join(User, User.id == Scorecard.judge_user_id)
                 .join(Registration, Registration.id == Scorecard.registration_id)
+                .outerjoin(Submission, (Submission.registration_id == Registration.id) & (Submission.stage_id == EvaluationRound.stage_id))
                 .where(Scorecard.status == "SUBMITTED")
                 .order_by(Scorecard.submitted_at.desc())
-            ).tuples():
+            )
+            matched = submission_search(search)
+            if matched is not None:
+                query = query.where(matched)
+            for card, round_, judge, registration, anonymous_code in session.execute(query).tuples():
                 if round_.id not in rubrics:
                     rubrics[round_.id] = judging.criteria(session, round_.id)
                 rows.append({
@@ -308,6 +354,7 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
                     "team_id": team_code(registration.id),
                     "team_name": registration.team_name,
                     "registration_id": str(registration.id),
+                    "anonymous_code": anonymous_code,
                     "round": round_.name,
                     "round_id": str(round_.id),
                     "scores": card.scores,
@@ -340,6 +387,45 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
     return router
 
 
+def _attention_counts(user_id) -> list[tuple[str, frozenset, object]]:
+    """(key, roles that may see it, scalar subquery) for every sidebar pill."""
+    listed = and_(Registration.event_id == ACTIVE_EVENT_ID, Registration.status.in_(LISTED_STATUSES))
+    open_round = and_(EvaluationRound.stage_id == Submission.stage_id, EvaluationRound.status != "CLOSED")
+    teams_review = select(func.count(Registration.id)).where(
+        Registration.event_id == ACTIVE_EVENT_ID, Registration.status == "PAID", Registration.details_review_status == "PENDING").scalar_subquery()
+    acm_pending = (
+        select(func.count(RegistrationMember.id)).join(Registration, Registration.id == RegistrationMember.registration_id)
+        .where(listed, RegistrationMember.is_acm_member.is_(True), RegistrationMember.acm_review_status.in_(("PENDING", "RECHECK")))
+    ).scalar_subquery()
+    payments_review = select(func.count(PaymentAttempt.id)).where(PaymentAttempt.status == "NEEDS_REVIEW").scalar_subquery()
+    contacts_new = select(func.count(ContactMessage.id)).where(ContactMessage.status == "NEW").scalar_subquery()
+    unassigned = (
+        select(func.count(Submission.id)).join(Registration, Registration.id == Submission.registration_id)
+        .where(
+            Registration.event_id == ACTIVE_EVENT_ID, Registration.status == "PAID", Submission.status == "SUBMITTED",
+            exists(select(EvaluationRound.id).where(open_round)),
+            ~exists(
+                select(EvaluationAssignment.id).join(EvaluationRound, EvaluationRound.id == EvaluationAssignment.round_id)
+                .where(open_round, EvaluationAssignment.registration_id == Submission.registration_id)
+            ),
+        )
+    ).scalar_subquery()
+    my_pending = (
+        select(func.count(EvaluationAssignment.id)).join(EvaluationRound, EvaluationRound.id == EvaluationAssignment.round_id)
+        .outerjoin(Scorecard, Scorecard.assignment_id == EvaluationAssignment.id)
+        .where(EvaluationAssignment.judge_user_id == user_id, EvaluationRound.status == "OPEN",
+               func.coalesce(Scorecard.status, literal("NOT_STARTED")) != "SUBMITTED")
+    ).scalar_subquery()
+    return [
+        ("teams_review", TEAM_REVIEW_ROLES, teams_review),
+        ("acm_pending", TEAM_REVIEW_ROLES, acm_pending),
+        ("payments_review", MONEY_ROLES, payments_review),
+        ("contacts_new", SUPPORT_ROLES, contacts_new),
+        ("submissions_unassigned", ASSIGNMENT_ROLES, unassigned),
+        ("my_assignments", frozenset({RoleCode.JUDGE}), my_pending),
+    ]
+
+
 def _local_day(timezone: str):
     return func.date(func.timezone(timezone, Registration.created_at))
 
@@ -353,8 +439,15 @@ def _backfill_categories(session: Session) -> None:
         session.commit()
 
 
-def _page(session, timezone, registered_on, category, status, search, page, page_size, finals=None):
-    _backfill_categories(session)
+def _list_filters(registered_on, category, status, search, finals, timezone) -> list:
+    """The Registrations/Teams table filters as SQL conditions (date included)."""
+    filters = _base_filters(category, status, search, finals)
+    if registered_on is not None:
+        filters.append(_local_day(timezone) == registered_on)
+    return filters
+
+
+def _base_filters(category, status, search, finals) -> list:
     filters = [Registration.event_id == ACTIVE_EVENT_ID]
     if finals is not None:
         filters.append(Registration.finals_status == finals)
@@ -364,9 +457,15 @@ def _page(session, timezone, registered_on, category, status, search, page, page
         filters.append(Registration.status == status)
     if category is not None:
         filters.append(Registration.category == category.value)
-    if search:
-        pattern = f"%{search.strip().lower()}%"
-        filters.append(func.lower(Registration.team_name).like(pattern) | func.lower(Registration.leader_email).like(pattern))
+    matched = team_search(search)
+    if matched is not None:
+        filters.append(matched)
+    return filters
+
+
+def _page(session, timezone, registered_on, category, status, search, page, page_size, finals=None):
+    _backfill_categories(session)
+    filters = _base_filters(category, status, search, finals)
     day = _local_day(timezone)
     leader_adamas = select(RegistrationMember.id).where(
         RegistrationMember.registration_id == Registration.id, RegistrationMember.role == "leader",
