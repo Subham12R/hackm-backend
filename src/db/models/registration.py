@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.db.base import Base
@@ -299,6 +299,7 @@ class PaymentWebhookEvent(Base):
 
 class EmailOutbox(Base):
     __tablename__ = "email_outbox"
+    __table_args__ = (Index("ix_email_outbox_batch_pending", "batch_key", "status"),)
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     recipient: Mapped[str] = mapped_column(String(320))
@@ -306,6 +307,8 @@ class EmailOutbox(Base):
     html: Mapped[str] = mapped_column(Text)
     # noreply, support or announcements (src/communications/senders.py).
     sender: Mapped[str] = mapped_column(String(20), default="noreply")
+    # Set for campaign mail (the campaign id): such rows are delivered through the provider's batch API.
+    batch_key: Mapped[str | None] = mapped_column(String(64))
     # PENDING -> SENT, or FAILED after the retry budget.
     status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)

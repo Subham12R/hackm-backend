@@ -145,6 +145,26 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
             rows, total, daily = _page(session, timezone, registered_on, category, status, search, page, page_size, finals)
             return {"items": _team_rows(session, rows, timezone), "total": total, "page": page, "page_size": page_size, "daily_counts": daily}
 
+    @router.get("/teams/ids")
+    def matching_team_ids(
+        request: Request,
+        authorization: str = Header(),
+        registered_on: date | None = Query(None, alias="date"),
+        category: RegistrationCategory | None = None,
+        status: Literal["PAYMENT_PENDING", "PAID", "REFUNDED", "ABANDONED", "REJECTED", "ALL"] | None = None,
+        search: str | None = Query(None, max_length=100),
+        finals: Literal["PENDING", "ACCEPTED", "DECLINED"] | None = None,
+    ):
+        """Every registration id matching the table filters (all pages), for "Email all matching"."""
+        session, _user = admin_user(request, authorization)
+        with session:
+            timezone = current_event(session).timezone
+            ids = session.scalars(
+                select(Registration.id).where(*_list_filters(registered_on, category, status, search, finals, timezone))
+                .order_by(Registration.created_at.desc()).limit(2001)
+            ).all()
+            return {"ids": [str(item) for item in ids[:2000]], "truncated": len(ids) > 2000}
+
     @router.post("/teams/{registration_id}/review")
     def review_team(registration_id: UUID, payload: TeamReviewRequest, request: Request, authorization: str = Header()):
         session, actor = admin_user(request, authorization, TEAM_REVIEW_ROLES)
@@ -419,8 +439,15 @@ def _backfill_categories(session: Session) -> None:
         session.commit()
 
 
-def _page(session, timezone, registered_on, category, status, search, page, page_size, finals=None):
-    _backfill_categories(session)
+def _list_filters(registered_on, category, status, search, finals, timezone) -> list:
+    """The Registrations/Teams table filters as SQL conditions (date included)."""
+    filters = _base_filters(category, status, search, finals)
+    if registered_on is not None:
+        filters.append(_local_day(timezone) == registered_on)
+    return filters
+
+
+def _base_filters(category, status, search, finals) -> list:
     filters = [Registration.event_id == ACTIVE_EVENT_ID]
     if finals is not None:
         filters.append(Registration.finals_status == finals)
@@ -433,6 +460,12 @@ def _page(session, timezone, registered_on, category, status, search, page, page
     matched = team_search(search)
     if matched is not None:
         filters.append(matched)
+    return filters
+
+
+def _page(session, timezone, registered_on, category, status, search, page, page_size, finals=None):
+    _backfill_categories(session)
+    filters = _base_filters(category, status, search, finals)
     day = _local_day(timezone)
     leader_adamas = select(RegistrationMember.id).where(
         RegistrationMember.registration_id == Registration.id, RegistrationMember.role == "leader",
