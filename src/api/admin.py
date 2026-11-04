@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from src import realtime
 from src.api.deps import authenticated_user, role_codes
-from src.api.search import submission_search, team_search
+from src.api.search import review_filter, submission_search, team_search
 from src.audit import audit
 from src.auth.policies import (
     ADMIN_PORTAL_ROLES,
@@ -136,13 +136,14 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
         status: Literal["PAYMENT_PENDING", "PAID", "REFUNDED", "ABANDONED", "REJECTED", "ALL"] | None = None,
         search: str | None = Query(None, max_length=100),
         finals: Literal["PENDING", "ACCEPTED", "DECLINED"] | None = None,
+        review: Literal["PENDING", "VERIFIED", "DECLINED"] | None = None,
         page: int = Query(1, ge=1),
         page_size: int = Query(10, ge=1, le=100),
     ):
         session, _user = admin_user(request, authorization)
         with session:
             timezone = current_event(session).timezone
-            rows, total, daily = _page(session, timezone, registered_on, category, status, search, page, page_size, finals)
+            rows, total, daily = _page(session, timezone, registered_on, category, status, search, page, page_size, finals, review)
             return {"items": _team_rows(session, rows, timezone), "total": total, "page": page, "page_size": page_size, "daily_counts": daily}
 
     @router.get("/teams/ids")
@@ -154,13 +155,14 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
         status: Literal["PAYMENT_PENDING", "PAID", "REFUNDED", "ABANDONED", "REJECTED", "ALL"] | None = None,
         search: str | None = Query(None, max_length=100),
         finals: Literal["PENDING", "ACCEPTED", "DECLINED"] | None = None,
+        review: Literal["PENDING", "VERIFIED", "DECLINED"] | None = None,
     ):
         """Every registration id matching the table filters (all pages), for "Email all matching"."""
         session, _user = admin_user(request, authorization)
         with session:
             timezone = current_event(session).timezone
             ids = session.scalars(
-                select(Registration.id).where(*_list_filters(registered_on, category, status, search, finals, timezone))
+                select(Registration.id).where(*_list_filters(registered_on, category, status, search, finals, timezone, review))
                 .order_by(Registration.created_at.desc()).limit(2001)
             ).all()
             return {"ids": [str(item) for item in ids[:2000]], "truncated": len(ids) > 2000}
@@ -439,18 +441,19 @@ def _backfill_categories(session: Session) -> None:
         session.commit()
 
 
-def _list_filters(registered_on, category, status, search, finals, timezone) -> list:
+def _list_filters(registered_on, category, status, search, finals, timezone, review=None) -> list:
     """The Registrations/Teams table filters as SQL conditions (date included)."""
-    filters = _base_filters(category, status, search, finals)
+    filters = _base_filters(category, status, search, finals, review)
     if registered_on is not None:
         filters.append(_local_day(timezone) == registered_on)
     return filters
 
 
-def _base_filters(category, status, search, finals) -> list:
+def _base_filters(category, status, search, finals, review=None) -> list:
     filters = [Registration.event_id == ACTIVE_EVENT_ID]
     if finals is not None:
         filters.append(Registration.finals_status == finals)
+    filters.extend(review_filter(review))
     if status is None:
         filters.append(Registration.status.in_(LISTED_STATUSES))
     elif status != "ALL":
@@ -463,9 +466,9 @@ def _base_filters(category, status, search, finals) -> list:
     return filters
 
 
-def _page(session, timezone, registered_on, category, status, search, page, page_size, finals=None):
+def _page(session, timezone, registered_on, category, status, search, page, page_size, finals=None, review=None):
     _backfill_categories(session)
-    filters = _base_filters(category, status, search, finals)
+    filters = _base_filters(category, status, search, finals, review)
     day = _local_day(timezone)
     leader_adamas = select(RegistrationMember.id).where(
         RegistrationMember.registration_id == Registration.id, RegistrationMember.role == "leader",

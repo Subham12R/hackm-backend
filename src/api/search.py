@@ -43,6 +43,17 @@ def team_search(term: str | None):
     return or_(contains(Registration.team_name, value), contains(Registration.leader_email, value), team_code_match(value))
 
 
+def review_filter(review: str | None) -> list:
+    """The Teams table "Review" filter. "Not verified" (PENDING) means a registered (paid or
+    fee-waived) team still waiting on details review, the same rule as the sidebar pill and the
+    amber row tint; unpaid teams have nothing to verify yet."""
+    if not review:
+        return []
+    if review == "PENDING":
+        return [Registration.status == "PAID", Registration.details_review_status == "PENDING"]
+    return [Registration.details_review_status == review]
+
+
 def submission_search(term: str | None, *, with_team: bool = True):
     """Submission code and project name, plus the team fields when the viewer may see identities."""
     value = needle(term)
