@@ -13,7 +13,9 @@ from src.auth.policies import RoleCode
 from src.cache import ADMIN_AGGREGATES
 from src.db.models.judging import EvaluationAssignment, EvaluationRound, Scorecard
 from src.db.models.registration import Submission
+from src.db.models.stage import Stage
 from src.judging import service as judging
+from src.submissions import form as submission_form
 
 
 class ScorecardRequest(BaseModel):
@@ -129,17 +131,13 @@ def _assignment_payload(session, assignment, round_: EvaluationRound, submission
         "total": judging.scorecard_total(rubric, card.scores) if card and card.scores else None,
     }
     if detail:
+        stage = session.get(Stage, round_.stage_id)
         payload.update({
-            "description": submission.description,
-            "links": [
-                {"label": label, "href": href}
-                for label, href in (
-                    ("Repository", submission.github_url), ("Pitch deck", submission.pitch_deck_url), ("Demo", submission.demo_url),
-                    ("Video", submission.video_url), ("Write-up", submission.documentation_url),
-                )
-                if href
-            ],
-            "criteria": [{"key": item.key, "label": item.label, "max_score": item.max_score, "weight": item.weight} for item in rubric],
+            "description": submission.description if submission_form.field_enabled(stage, "description") else "",
+            "links": submission_form.builtin_links(stage, submission),
+            "answers": submission_form.judge_answers(stage, submission),
+            "criteria": [{"key": item.key, "label": item.label, "description": item.description, "max_score": item.max_score, "weight": item.weight}
+                         for item in rubric],
             "scores": card.scores if card else {},
             "comments": card.comments if card else "",
             "submitted_at": card.submitted_at.isoformat() if card and card.submitted_at else None,

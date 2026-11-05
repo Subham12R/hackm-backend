@@ -36,8 +36,10 @@ class ExportRequest(BaseModel):
             raise ValueError(f"unknown fields: {', '.join(unknown)}")
         if self.scope == "SELECTED" and not self.ids:
             raise ValueError("tick at least one row to export the selection")
+        if self.filters.get("stage_id") == "all" and self.dataset != "submissions":
+            raise ValueError("only the Submissions export can cover all events at once")
         for key in ("stage_id", "track_id", "round_id"):
-            if self.filters.get(key):
+            if self.filters.get(key) and not (key == "stage_id" and self.filters[key] == "all"):
                 UUID(self.filters[key])
         return self
 

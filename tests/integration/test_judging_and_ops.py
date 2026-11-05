@@ -107,7 +107,12 @@ def test_rubric_locks_once_scoring_starts_and_reopen_is_audited() -> None:
     assignment = next(item for item in harness.client.get("/api/v1/judge/assignments", headers=judge).json()["items"] if item["round"]["id"] == round_id)
     url = f"/api/v1/judge/assignments/{assignment['assignment_id']}/scorecard"
     assert harness.client.put(url, headers=judge, json={"scores": {}}).status_code == 409  # round still DRAFT
-    harness.client.patch(f"/api/v1/admin/rounds/{round_id}", headers=coordinator, json={"status": "OPEN"})
+    # A round only opens once its rubric is confirmed (saving the default one is enough).
+    assert harness.client.patch(f"/api/v1/admin/rounds/{round_id}", headers=coordinator, json={"status": "OPEN"}).status_code == 409
+    defaults = harness.client.get("/api/v1/admin/rounds", headers=coordinator).json()["items"]
+    rubric = next(item for item in defaults if item["id"] == round_id)["criteria"]
+    assert harness.client.put(f"/api/v1/admin/rounds/{round_id}/criteria", headers=coordinator, json={"criteria": rubric}).status_code == 200
+    assert harness.client.patch(f"/api/v1/admin/rounds/{round_id}", headers=coordinator, json={"status": "OPEN"}).status_code == 200
     scores = {key: 5 for key in ("innovation", "technical", "problem_solving", "ui_ux", "completeness")}
     assert harness.client.post(f"{url}/submit", headers=judge, json={"scores": scores}).status_code == 200
     assert harness.client.put(f"/api/v1/admin/rounds/{round_id}/criteria", headers=coordinator,

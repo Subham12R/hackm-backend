@@ -15,10 +15,13 @@ from src.db.models.contact import ContactMessage
 from src.db.models.credential import BadgeDefinition, CertificateType, Credential
 from src.db.models.judging import ResultRow
 from src.db.models.media import GalleryPhoto, SiteNotice
+from src.db.models.registration import Submission
+from src.db.models.stage import Stage
 from src.db.session import create_db_engine
 from src.events import stages as stage_rules
 from src.events.service import ACTIVE_EVENT_ID, current_event, event_payload
 from src.judging.service import released_snapshots
+from src.submissions import form as submission_form
 
 router = APIRouter(prefix="/api/v1/public", tags=["public"])
 
@@ -75,10 +78,17 @@ def public_leaderboard(request: Request):
             rows = session.scalars(
                 select(ResultRow).where(ResultRow.snapshot_id == snapshot.id, ResultRow.eligible).order_by(ResultRow.rank)
             ).all()
+            # The team's live website (the form's demo link), only on a released board and only when the event asks for it.
+            stage = session.get(Stage, round_.stage_id)
+            websites = dict(session.execute(
+                select(Submission.registration_id, Submission.demo_url)
+                .where(Submission.stage_id == round_.stage_id, Submission.registration_id.in_([row.registration_id for row in rows]))
+            ).tuples().all()) if rows and submission_form.field_enabled(stage, "demo_url") else {}
             return {
                 "released": True,
                 "round": {"name": round_.name, "released_at": snapshot.released_at.isoformat()},
-                "rows": [{"rank": row.rank, "team_name": row.team_name, "project_name": row.project_name, "score": row.score} for row in rows],
+                "rows": [{"rank": row.rank, "team_name": row.team_name, "project_name": row.project_name, "score": row.score,
+                          "website_url": websites.get(row.registration_id) or None} for row in rows],
             }
 
         return request.app.state.cache.get_or_set(PUBLIC_LEADERBOARD, "current", 60, produce)

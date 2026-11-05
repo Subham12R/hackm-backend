@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from src.db.models.export import ExportJob
 from src.db.session import create_db_engine
-from src.exports.datasets import DATASETS
+from src.exports.datasets import DATASETS, resolve_columns
 
 logger = logging.getLogger(__name__)
 CHUNK = 500
@@ -44,7 +44,7 @@ def tidy(session: Session) -> None:
 
 def build(session: Session, job: ExportJob) -> tuple[bytes, int]:
     dataset = DATASETS[job.dataset]
-    columns = [column for column in dataset.columns if column.key in set(job.fields)] or dataset.columns
+    columns = resolve_columns(session, dataset, job.fields, job.filters or {})
     order = dataset.order()
     base = dataset.query(session, job.filters or {})
     if job.scope == "SELECTED":

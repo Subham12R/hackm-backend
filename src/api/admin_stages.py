@@ -23,6 +23,7 @@ from src.db.models.stage import Stage, SubmissionAward, Track
 from src.events import stages as stage_rules
 from src.events.service import current_event
 from src.operations import team_code
+from src.submissions import form as submission_form
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 SCHEDULE = ("submission_opens_at", "submission_closes_at", "statements_release_at")
@@ -95,8 +96,65 @@ class TeamTrackRequest(BaseModel):
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=300)]
 
 
+class SubmissionFormRequest(BaseModel):
+    # Validated in src/submissions/form.py so the rules live next to the answers' validation.
+    fields: list[dict] = Field(min_length=1, max_length=80)
+
+
+def _answered_keys(session, stage_id) -> set[str]:
+    keys: set[str] = set()
+    for answers in session.scalars(select(Submission.answers).where(Submission.stage_id == stage_id)):
+        keys.update(key for key, value in (answers or {}).items() if value not in (None, "", [], False))
+    return keys
+
+
+def _form_admin_payload(session, stage: Stage) -> dict:
+    submitted = session.scalar(select(func.count(Submission.id)).where(Submission.stage_id == stage.id, Submission.status == "SUBMITTED")) or 0
+    return {"stage_id": str(stage.id), "customized": bool(stage.submission_form), "fields": submission_form.fields(stage),
+            "submitted": int(submitted), "answered_keys": sorted(_answered_keys(session, stage.id)),
+            "defaults": submission_form.default_fields()}
+
+
 def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
     router = APIRouter(prefix="/api/v1/admin", tags=["admin-stages"])
+
+    @router.get("/stages/{stage_id}/submission-form")
+    def get_submission_form(stage_id: UUID, request: Request, authorization: str = Header()):
+        session, _user = authenticated_user(request, authorization, public_key, ADMIN_READ_ROLES)
+        with session:
+            return _form_admin_payload(session, stage_rules.get_stage(session, stage_id, current_event(session).id))
+
+    @router.put("/stages/{stage_id}/submission-form")
+    def put_submission_form(stage_id: UUID, payload: SubmissionFormRequest, request: Request, authorization: str = Header()):
+        """Replace an event's submission form. Finalized submissions are never re-checked against it."""
+        session, actor = authenticated_user(request, authorization, public_key, EVENT_CONTROL_ROLES)
+        with session:
+            stage = stage_rules.get_stage(session, stage_id, current_event(session).id, lock=True)
+            try:
+                fields = submission_form.validate_config(payload.fields, submission_form.fields(stage), _answered_keys(session, stage.id))
+            except submission_form.FormError as error:
+                raise HTTPException(422, str(error)) from None
+            stage.submission_form = {"fields": fields}
+            stage.updated_at, stage.updated_by_user_id = datetime.now(UTC), actor.id
+            audit(session, actor, "Updated submission form", "stage", stage.id, event=stage.name,
+                  fields=", ".join(item["key"] for item in fields if item.get("enabled", True) and not item.get("archived")))
+            session.commit()
+            request.app.state.cache.invalidate(PUBLIC_EVENT, ADMIN_AGGREGATES)
+            return _form_admin_payload(session, stage)
+
+    @router.delete("/stages/{stage_id}/submission-form", status_code=200)
+    def reset_submission_form(stage_id: UUID, request: Request, authorization: str = Header()):
+        """Back to the built-in form. Refused once teams answered custom fields (their answers would be hidden)."""
+        session, actor = authenticated_user(request, authorization, public_key, EVENT_CONTROL_ROLES)
+        with session:
+            stage = stage_rules.get_stage(session, stage_id, current_event(session).id, lock=True)
+            custom = {item["key"] for item in submission_form.fields(stage) if not item.get("builtin")}
+            if custom & _answered_keys(session, stage.id):
+                raise HTTPException(409, "teams have answered custom fields; remove the fields you don't need instead")
+            stage.submission_form = None
+            audit(session, actor, "Reset submission form", "stage", stage.id, event=stage.name)
+            session.commit()
+            return _form_admin_payload(session, stage)
 
     @router.get("/stages")
     def list_stages(request: Request, authorization: str = Header()):
