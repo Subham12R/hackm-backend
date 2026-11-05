@@ -23,6 +23,9 @@ class EvaluationRound(Base):
     # ALL_SUBMITTED: every finalized team; SHORTLIST: only teams advanced into round_entries.
     scope: Mapped[str] = mapped_column(String(20), default="ALL_SUBMITTED")
     min_evaluations: Mapped[int] = mapped_column(Integer, default=1)
+    # Set when an admin saves (or accepts) the rubric; a round cannot open before it.
+    rubric_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rubric_confirmed_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -34,6 +37,8 @@ class EvaluationCriterion(Base):
     round_id: Mapped[UUID] = mapped_column(ForeignKey("evaluation_rounds.id", ondelete="CASCADE"), index=True)
     key: Mapped[str] = mapped_column(String(60))
     label: Mapped[str] = mapped_column(String(120))
+    # What judges should look for; shown under the score box.
+    description: Mapped[str] = mapped_column(Text, default="")
     max_score: Mapped[int] = mapped_column(Integer, default=10)
     weight: Mapped[float] = mapped_column(Float, default=1.0)
     position: Mapped[int] = mapped_column(Integer, default=0)

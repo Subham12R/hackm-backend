@@ -50,12 +50,18 @@ class RoundUpdate(BaseModel):
 class CriterionRequest(BaseModel):
     key: Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^[a-z][a-z0-9_]{0,59}$")]
     label: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+    # What judges should look for; shown under the score box.
+    description: Annotated[str, StringConstraints(strip_whitespace=True, max_length=500)] = ""
     max_score: int = Field(ge=1, le=100)
     weight: float = Field(gt=0, le=100)
 
 
 class CriteriaRequest(BaseModel):
     criteria: list[CriterionRequest] = Field(min_length=1, max_length=20)
+
+
+class CopyRubricRequest(BaseModel):
+    from_round_id: UUID
 
 
 class AssignmentRequest(BaseModel):
@@ -119,6 +125,8 @@ def admin_judging_router(public_key: Ed25519PublicKey) -> APIRouter:
                 if value is not None and getattr(round_, field) != value:
                     changes[field] = value
                     setattr(round_, field, value)
+            if changes.get("status") == "OPEN" and round_.rubric_confirmed_at is None:
+                raise HTTPException(409, "confirm the rubric before opening the round, so judges score on the metrics you set")
             if "scope" in changes and session.scalar(select(EvaluationAssignment.id).where(EvaluationAssignment.round_id == round_.id)) is not None:
                 raise HTTPException(409, "scope cannot change after judges are assigned")
             if changes:
@@ -145,21 +153,47 @@ def admin_judging_router(public_key: Ed25519PublicKey) -> APIRouter:
 
     @router.put("/rounds/{round_id}/criteria")
     def replace_criteria(round_id: UUID, payload: CriteriaRequest, request: Request, authorization: str = Header()):
+        """Save (and confirm) the round's rubric. Once a judge has started scoring only the wording can change."""
         session, actor = authenticated_user(request, authorization, public_key, ASSIGNMENT_ROLES)
         with session:
             round_ = load_round(session, round_id, lock=True)
             keys = [item.key for item in payload.criteria]
             if len(set(keys)) != len(keys):
                 raise HTTPException(422, "criterion keys must be unique")
-            if session.scalar(select(Scorecard.id).where(Scorecard.round_id == round_.id)) is not None:
-                raise HTTPException(409, "the rubric is locked once judges start scoring")
-            for criterion in judging.criteria(session, round_.id):
-                session.delete(criterion)
-            session.flush()
-            for position, item in enumerate(payload.criteria):
-                session.add(EvaluationCriterion(round_id=round_.id, key=item.key, label=item.label, max_score=item.max_score, weight=item.weight, position=position))
+            current = judging.criteria(session, round_.id)
+            if session.scalar(select(Scorecard.id).where(Scorecard.round_id == round_.id).limit(1)) is not None:
+                shape = [(item.key, item.max_score, float(item.weight)) for item in current]
+                if shape != [(item.key, item.max_score, float(item.weight)) for item in payload.criteria]:
+                    raise HTTPException(409, "judges have started scoring, so only labels and descriptions can change; create a new round to change criteria, maximums or weights")
+                for criterion, item in zip(current, payload.criteria, strict=True):
+                    criterion.label, criterion.description = item.label, item.description
+            else:
+                _write_rubric(session, round_, payload.criteria)
+            _confirm(round_, actor)
             audit(session, actor, "Updated rubric", "round", round_.id, criteria=", ".join(keys))
             session.commit()
+            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            return _round_summary(session, round_)
+
+    @router.post("/rounds/{round_id}/criteria/copy")
+    def copy_criteria(round_id: UUID, payload: CopyRubricRequest, request: Request, authorization: str = Header()):
+        """Reuse another round's rubric (any event). Only before judges start scoring."""
+        session, actor = authenticated_user(request, authorization, public_key, ASSIGNMENT_ROLES)
+        with session:
+            round_ = load_round(session, round_id, lock=True)
+            source = load_round(session, payload.from_round_id)
+            if source.id == round_.id:
+                raise HTTPException(422, "pick a different round to copy from")
+            if session.scalar(select(Scorecard.id).where(Scorecard.round_id == round_.id).limit(1)) is not None:
+                raise HTTPException(409, "judges have started scoring in this round; its rubric can no longer be replaced")
+            criteria = judging.criteria(session, source.id)
+            if not criteria:
+                raise HTTPException(422, "that round has no rubric")
+            _write_rubric(session, round_, criteria)
+            _confirm(round_, actor)
+            audit(session, actor, "Copied rubric", "round", round_.id, source=source.name)
+            session.commit()
+            request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             return _round_summary(session, round_)
 
     @router.get("/rounds/{round_id}/board")
@@ -471,18 +505,37 @@ def _assignment(round_: EvaluationRound, registration_id, judge: User, actor: Us
     return EvaluationAssignment(round_id=round_.id, registration_id=registration_id, judge_user_id=judge.id, assigned_by_user_id=actor.id)
 
 
+def _write_rubric(session, round_: EvaluationRound, items) -> None:
+    for criterion in judging.criteria(session, round_.id):
+        session.delete(criterion)
+    session.flush()
+    for position, item in enumerate(items):
+        session.add(EvaluationCriterion(round_id=round_.id, key=item.key, label=item.label, description=item.description or "",
+                                        max_score=item.max_score, weight=item.weight, position=position))
+    session.flush()
+
+
+def _confirm(round_: EvaluationRound, actor: User) -> None:
+    round_.rubric_confirmed_at = datetime.now(UTC)
+    round_.rubric_confirmed_by_user_id = actor.id
+
+
 def _round_summary(session, round_: EvaluationRound) -> dict:
     snapshot = session.scalar(select(ResultSnapshot.status).where(ResultSnapshot.round_id == round_.id))
     assignments = session.scalar(select(func.count(EvaluationAssignment.id)).where(EvaluationAssignment.round_id == round_.id)) or 0
     submitted = session.scalar(select(func.count(Scorecard.id)).where(Scorecard.round_id == round_.id, Scorecard.status == "SUBMITTED")) or 0
+    started = session.scalar(select(func.count(Scorecard.id)).where(Scorecard.round_id == round_.id)) or 0
     stage = session.get(Stage, round_.stage_id)
     return {
         "id": str(round_.id), "name": round_.name, "sequence": round_.sequence, "status": round_.status, "scope": round_.scope,
         "stage": {"id": str(stage.id), "name": stage.name} if stage else None,
         "min_evaluations": round_.min_evaluations, "results_status": snapshot or "NONE",
         "assignments": int(assignments), "submitted_scorecards": int(submitted),
+        # Draft or submitted: once any exists the rubric's shape is locked.
+        "scorecards_started": int(started),
+        "rubric_confirmed_at": round_.rubric_confirmed_at.isoformat() if round_.rubric_confirmed_at else None,
         "criteria": [
-            {"key": item.key, "label": item.label, "max_score": item.max_score, "weight": item.weight}
+            {"key": item.key, "label": item.label, "description": item.description, "max_score": item.max_score, "weight": item.weight}
             for item in judging.criteria(session, round_.id)
         ],
     }

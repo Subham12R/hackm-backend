@@ -49,6 +49,7 @@ from src.operations import team_code
 from src.payments import service as payments
 from src.payments.providers.razorpay import create_order
 from src.registrations import roster
+from src.submissions import form as submission_form
 from src.submissions.codes import new_anonymous_code
 
 
@@ -80,6 +81,8 @@ class SubmissionRequest(BaseModel):
     video_url: Link = ""
     documentation_url: Link = ""
     description: Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)] = ""
+    # Answers to the event's custom form fields; omitted keeps the stored answers (older clients).
+    answers: dict | None = None
     # The problem statement (track) of the stage the team is building for.
     track_id: UUID | None = None
     # The version the client edited; a mismatch means another tab saved first.
@@ -205,6 +208,7 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 "adjustment": {"status": registration.adjustment_status, "amount_minor": registration.adjustment_amount_minor},
                 "members": [_member_payload(member) for member in members],
                 "submission": _submission_payload(submission),
+                "submission_form": submission_form.form_payload(stage),
                 "finals": _finals(session, registration, members, event),
                 "event": event_payload(event, now, stage),
                 "unread_announcements": int(unread or 0),
@@ -708,8 +712,13 @@ def _save_submission(session: Session, request: Request, registration: Registrat
         # With a single problem statement there is nothing to choose.
         if options and stage_rules.statements_released(stage, now):
             _lock_track(submission, options[0].id, now)
+    try:
+        answers = submission_form.clean_answers(stage, payload.answers, submission.answers)
+    except submission_form.FormError as error:
+        raise HTTPException(422, str(error)) from None
     for field in ("project_name", "github_url", "pitch_deck_url", "demo_url", "video_url", "documentation_url", "description"):
         setattr(submission, field, getattr(payload, field))
+    submission.answers = answers
     submission.version = (submission.version or 0) + 1
     submission.updated_at = now
     session.commit()
@@ -727,8 +736,9 @@ def _finalize_submission(session: Session, request: Request, user: User, registr
     if registration.adjustment_status == "REQUIRED":
         raise HTTPException(409, "pay the balance due before final submission")
     submission = _editable_submission(session, registration.id, stage.id)
-    if not submission.project_name or not submission.github_url or not submission.pitch_deck_url:
-        raise HTTPException(422, "project name, GitHub URL, and pitch deck URL are required")
+    missing = submission_form.missing_required(stage, submission)
+    if missing:
+        raise HTTPException(422, f"fill in the required fields before submitting: {', '.join(missing)}")
     if submission.track_id is None:
         options = stage_rules.tracks(session, stage.id)
         # With a single problem statement there is nothing to choose.
@@ -752,7 +762,7 @@ def _editable_submission(session: Session, registration_id, stage_id) -> Submiss
     submission = _submission_for(session, registration_id, stage_id, lock=True)
     if submission is None:
         submission = Submission(registration_id=registration_id, stage_id=stage_id, status="DRAFT", project_name="", github_url="", demo_url="",
-                                video_url="", pitch_deck_url="", documentation_url="", description="", version=0)
+                                video_url="", pitch_deck_url="", documentation_url="", description="", answers={}, version=0)
         session.add(submission)
         try:
             session.flush()
@@ -778,6 +788,7 @@ def _stage_payload(session: Session, stage: Stage, submission: Submission | None
         "timer": stage_rules.timer_payload(stage, started_at, now),
         # Problem statements stay server-side until the reveal time (and, in a timed event, until the team starts).
         "tracks": [stage_rules.track_payload(track) for track in rows] if visible else [],
+        "form": submission_form.form_payload(stage),
         "submission": _submission_payload(submission),
     }
 
@@ -785,7 +796,7 @@ def _stage_payload(session: Session, stage: Stage, submission: Submission | None
 def _submission_payload(submission: Submission | None) -> dict:
     if submission is None:
         return {"status": "NOT_STARTED", "project_name": "", "github_url": "", "pitch_deck_url": "", "demo_url": "", "video_url": "",
-                "documentation_url": "", "description": "", "track_id": None, "track_locked_at": None, "started_at": None, "version": 0,
+                "documentation_url": "", "description": "", "answers": {}, "track_id": None, "track_locked_at": None, "started_at": None, "version": 0,
                 "updated_at": None, "submitted_at": None}
     return {
         "status": submission.status,
@@ -799,6 +810,7 @@ def _submission_payload(submission: Submission | None) -> dict:
         "video_url": submission.video_url,
         "documentation_url": submission.documentation_url,
         "description": submission.description,
+        "answers": submission.answers or {},
         "version": submission.version,
         "updated_at": submission.updated_at.isoformat() if submission.updated_at else None,
         "submitted_at": submission.submitted_at.isoformat() if submission.submitted_at else None,

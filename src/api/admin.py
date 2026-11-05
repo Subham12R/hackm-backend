@@ -41,6 +41,7 @@ from src.judging import service as judging
 from src.operations import submission_label, team_code
 from src.payments import service as payments
 from src.registrations.pricing import RegistrationCategory
+from src.submissions import form as submission_form
 
 # Refunded teams are cancelled: they drop out of lists and counts, and stay under the Refunded filter and in the logs.
 LISTED_STATUSES = ("PAYMENT_PENDING", "PAID")
@@ -260,6 +261,7 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
                     # Timed events: when the team started its clock and its own cut-off.
                     "timer": stage_rules.timer_payload(stage, submission.started_at if submission else None, now),
                     "links": _submission_links(submission),
+                    "answers": submission_form.admin_answers(stage, submission),
                     "start_time": registration.created_at.isoformat(),
                     "updated_at": submission.updated_at.isoformat() if submission and submission.updated_at else None,
                     "end_time": submission.submitted_at.isoformat() if submission and submission.submitted_at else None,
@@ -701,5 +703,6 @@ def _evaluator_row(user: User) -> dict:
 
 def _round_row(round_: EvaluationRound) -> dict:
     return {"id": str(round_.id), "name": round_.name, "sequence": round_.sequence, "status": round_.status,
-            "scope": round_.scope, "min_evaluations": round_.min_evaluations}
+            "scope": round_.scope, "min_evaluations": round_.min_evaluations,
+            "rubric_confirmed_at": round_.rubric_confirmed_at.isoformat() if round_.rubric_confirmed_at else None}
 

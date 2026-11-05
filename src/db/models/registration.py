@@ -262,6 +262,8 @@ class Submission(Base):
     pitch_deck_url: Mapped[str] = mapped_column(String(500), default="")
     documentation_url: Mapped[str] = mapped_column(String(500), default="")
     description: Mapped[str] = mapped_column(String(1000), default="")
+    # Answers to the event's custom form fields, keyed by field key (src/submissions/form.py).
+    answers: Mapped[dict] = mapped_column(JSON, default=dict)
     version: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

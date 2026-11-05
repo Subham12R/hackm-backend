@@ -40,6 +40,8 @@ class Stage(Base):
     statements_release_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Optional per-team time limit: each team gets this long from when it starts, capped at submission close.
     time_limit_minutes: Mapped[int | None] = mapped_column(Integer)
+    # The admin-built submission form (src/submissions/form.py); NULL means the built-in default form.
+    submission_form: Mapped[dict | None] = mapped_column(JSON)
     # Set when an organiser marks the event completed; certificates for it can only be published after that.
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))

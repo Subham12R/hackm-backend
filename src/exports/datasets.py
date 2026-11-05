@@ -44,6 +44,16 @@ class Column:
     label: str
     get: Callable[[Any, dict], Any]
     default: bool = True
+    # A column that stands for several, worked out when the export runs (one per custom form field, per criterion...).
+    expand: Callable[[Session, dict], list["Column"]] | None = None
+
+
+@dataclass(frozen=True)
+class Preset:
+    key: str
+    label: str
+    description: str
+    fields: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -57,6 +67,7 @@ class Dataset:
     query: Callable[[Session, dict], Select]
     order: Callable[[], list]
     enrich: Callable[[Session, list, dict], dict] = field(default=lambda _session, _rows, _filters: {})
+    presets: tuple[Preset, ...] = ()
 
 
 def _when(value: datetime | None) -> str:
@@ -103,7 +114,13 @@ def _registration_filters(filters: dict) -> list:
     return conditions
 
 
+ALL_STAGES = "all"
+
+
 def _stage_id(session: Session, filters: dict):
+    """The event an export covers; None for "all" (only the Submissions dataset accepts that)."""
+    if filters.get("stage_id") == ALL_STAGES:
+        return None
     if filters.get("stage_id"):
         return UUID(str(filters["stage_id"]))
     return session.scalar(select(Stage.id).where(Stage.event_id == ACTIVE_EVENT_ID).order_by(Stage.position, Stage.id).limit(1))
@@ -228,8 +245,10 @@ def _submission_query(session, filters):
     query = (
         select(Submission, Registration)
         .join(Registration, Registration.id == Submission.registration_id)
-        .where(Registration.event_id == ACTIVE_EVENT_ID, Submission.stage_id == stage_id)
+        .where(Registration.event_id == ACTIVE_EVENT_ID)
     )
+    if stage_id is not None:
+        query = query.where(Submission.stage_id == stage_id)
     if filters.get("track_id"):
         query = query.where(Submission.track_id == UUID(str(filters["track_id"])))
     matched = submission_search(filters.get("search"))
@@ -238,14 +257,40 @@ def _submission_query(session, filters):
     return query
 
 
+def _export_stages(session, filters) -> list[Stage]:
+    stage_id = _stage_id(session, filters)
+    query = select(Stage).where(Stage.event_id == ACTIVE_EVENT_ID).order_by(Stage.position, Stage.id)
+    if stage_id is not None:
+        query = query.where(Stage.id == stage_id)
+    return list(session.scalars(query))
+
+
+def _latest_rounds(session, stage_ids) -> dict:
+    """Each stage's latest judging round (highest sequence)."""
+    latest: dict = {}
+    if stage_ids:
+        for round_ in session.scalars(select(EvaluationRound).where(EvaluationRound.stage_id.in_(list(stage_ids))).order_by(EvaluationRound.sequence)):
+            latest[round_.stage_id] = round_
+    return latest
+
+
 def _submission_enrich(session, rows, _filters) -> dict:
+    from src.judging import service as judging
+
     submissions = [row[0] for row in rows]
-    tracks = dict(session.execute(select(Track.id, Track.title).where(Track.id.in_({item.track_id for item in submissions if item.track_id}))).all()) if submissions else {}
-    stages = dict(session.execute(select(Stage.id, Stage.name).where(Stage.event_id == ACTIVE_EVENT_ID)).all())
+    track_rows = session.execute(select(Track.id, Track.title, Track.summary).where(Track.id.in_({item.track_id for item in submissions if item.track_id}))).all() if submissions else []
+    tracks = {row[0]: row[1] for row in track_rows}
+    summaries = {row[0]: row[2] for row in track_rows}
+    stage_rows = {stage.id: stage for stage in session.scalars(select(Stage).where(Stage.event_id == ACTIVE_EVENT_ID))}
+    stages = {key: value.name for key, value in stage_rows.items()}
     judges: dict = {}
     scored: dict = {}
+    comments: dict = {}
+    scores: dict = {}
     ids = [item.registration_id for item in submissions]
     stage_ids = {item.stage_id for item in submissions}
+    latest = _latest_rounds(session, stage_ids)
+    rubrics = {round_.id: judging.criteria(session, round_.id) for round_ in latest.values()}
     if ids:
         for registration_id, stage_id, name in session.execute(
             select(EvaluationAssignment.registration_id, EvaluationRound.stage_id, User.display_name)
@@ -254,14 +299,68 @@ def _submission_enrich(session, rows, _filters) -> dict:
             .where(EvaluationAssignment.registration_id.in_(ids), EvaluationRound.stage_id.in_(stage_ids))
         ).all():
             judges.setdefault((registration_id, stage_id), []).append(name)
-        for registration_id, stage_id, count in session.execute(
-            select(Scorecard.registration_id, EvaluationRound.stage_id, func.count(Scorecard.id))
+        cards: dict = {}
+        for card, stage_id in session.execute(
+            select(Scorecard, EvaluationRound.stage_id)
             .join(EvaluationRound, EvaluationRound.id == Scorecard.round_id)
             .where(Scorecard.registration_id.in_(ids), Scorecard.status == "SUBMITTED", EvaluationRound.stage_id.in_(stage_ids))
-            .group_by(Scorecard.registration_id, EvaluationRound.stage_id)
-        ).all():
-            scored[(registration_id, stage_id)] = int(count)
-    return {"tracks": tracks, "stages": stages, "judges": judges, "scored": scored}
+            .order_by(Scorecard.submitted_at)
+        ).tuples():
+            key = (card.registration_id, stage_id)
+            scored[key] = scored.get(key, 0) + 1
+            if card.comments:
+                comments.setdefault(key, []).append(card.comments.strip())
+            if stage_id in latest and card.round_id == latest[stage_id].id:
+                cards.setdefault(key, []).append(card)
+        # The latest round's average: overall weighted % and per criterion.
+        for key, team_cards in cards.items():
+            rubric = rubrics[latest[key[1]].id]
+            totals = [judging.scorecard_total(rubric, card.scores) for card in team_cards]
+            per = {item.key: round(sum(card.scores.get(item.key, 0) for card in team_cards) / len(team_cards), 2) for item in rubric}
+            scores[key] = {"total": round(sum(totals) / len(totals), 2), "criteria": per}
+    return {"tracks": tracks, "summaries": summaries, "stages": stages, "stage_rows": stage_rows, "judges": judges, "scored": scored,
+            "comments": comments, "scores": scores, "latest": latest, "members": _rosters(session, set(ids))}
+
+
+def _answer_columns(session, filters, judges_only: bool = False) -> list[Column]:
+    """One column per custom form field across the exported events (removed fields too: their answers are kept).
+
+    `judges_only` keeps the fields judges may see, so private questions (a phone, a contact) stay out of AI exports.
+    """
+    from src.submissions import form as submission_form
+
+    seen: dict = {}
+    for stage in _export_stages(session, filters):
+        for item in submission_form.fields(stage):
+            if item.get("builtin") or item["key"] in seen:
+                continue
+            if judges_only and (item.get("archived") or not item.get("show_to_judges", True)):
+                continue
+            seen[item["key"]] = item
+    return [
+        Column(f"answer:{key}", f"Q: {item['label']}",
+               lambda row, _ctx, key=key, item=item: submission_form.answer_text(item, (row[0].answers or {}).get(key)))
+        for key, item in seen.items()
+    ]
+
+
+def _criterion_columns(session, filters) -> list[Column]:
+    """One average-score column per criterion of each exported event's latest round."""
+    from src.judging import service as judging
+
+    seen: dict = {}
+    for round_ in _latest_rounds(session, [stage.id for stage in _export_stages(session, filters)]).values():
+        for item in judging.criteria(session, round_.id):
+            seen.setdefault(item.key, item)
+    return [
+        Column(f"criterion:{key}", f"Avg {item.label} (of {item.max_score})",
+               lambda row, ctx, key=key: ctx["scores"].get((row[0].registration_id, row[0].stage_id), {}).get("criteria", {}).get(key, ""))
+        for key, item in seen.items()
+    ]
+
+
+def _score(row, ctx):
+    return ctx["scores"].get((row[0].registration_id, row[0].stage_id), {}).get("total", "")
 
 
 SUBMISSIONS = Dataset(
@@ -276,18 +375,41 @@ SUBMISSIONS = Dataset(
         Column("submission_code", "Submission code", lambda row, _ctx: row[0].anonymous_code or ""),
         Column("project", "Project", lambda row, _ctx: row[0].project_name),
         Column("track", "Problem statement", lambda row, ctx: ctx["tracks"].get(row[0].track_id, "")),
+        Column("track_summary", "Problem statement summary", lambda row, ctx: ctx["summaries"].get(row[0].track_id, ""), default=False),
         Column("status", "Status", lambda row, _ctx: row[0].status),
         Column("github", "GitHub", lambda row, _ctx: row[0].github_url),
         Column("pitch_deck", "Pitch deck", lambda row, _ctx: row[0].pitch_deck_url),
-        Column("demo", "Demo", lambda row, _ctx: row[0].demo_url),
+        Column("demo", "Website / demo", lambda row, _ctx: row[0].demo_url),
         Column("video", "Video", lambda row, _ctx: row[0].video_url),
-        Column("docs", "Write-up", lambda row, _ctx: row[0].documentation_url, default=False),
-        Column("description", "Description", lambda row, _ctx: row[0].description, default=False),
+        Column("docs", "Write-up", lambda row, _ctx: row[0].documentation_url),
+        Column("description", "Description", lambda row, _ctx: row[0].description),
+        Column("answers", "Custom form answers (one column each)", lambda _row, _ctx: "", expand=_answer_columns),
+        Column("judge_answers", "Custom answers judges see (one column each)", lambda _row, _ctx: "", default=False,
+               expand=lambda session, filters: _answer_columns(session, filters, judges_only=True)),
+        Column("category", "Category", lambda row, _ctx: row[1].category or "", default=False),
+        Column("college", "College", lambda row, ctx: getattr(_leader(ctx, row[1]), "college", ""), default=False),
+        Column("members", "Members", lambda row, ctx: len(ctx["members"].get(row[1].id, [])), default=False),
+        Column("finals_status", "Finals", lambda row, _ctx: row[1].finals_status, default=False),
         Column("judges", "Judges", lambda row, ctx: ", ".join(ctx["judges"].get((row[0].registration_id, row[0].stage_id), []))),
         Column("evaluations", "Submitted scores", lambda row, ctx: ctx["scored"].get((row[0].registration_id, row[0].stage_id), 0)),
+        Column("score", "Latest round score (%)", _score, default=False),
+        Column("criteria", "Average per criterion (one column each)", lambda _row, _ctx: "", default=False, expand=_criterion_columns),
+        Column("judge_comments", "Judge comments", lambda row, ctx: " | ".join(ctx["comments"].get((row[0].registration_id, row[0].stage_id), [])), default=False),
         Column("submitted_at", "Submitted at", lambda row, _ctx: _when(row[0].submitted_at)),
         Column("updated_at", "Last edited", lambda row, _ctx: _when(row[0].updated_at), default=False),
     ],
+    presets=(
+        Preset("full", "Everything", "Every column, scores and judge comments included.",
+               ("team_code", "team_name", "event", "submission_code", "project", "track", "track_summary", "status", "github", "pitch_deck",
+                "demo", "video", "docs", "description", "answers", "category", "college", "members", "finals_status", "judges", "evaluations",
+                "score", "criteria", "judge_comments", "submitted_at", "updated_at")),
+        # Safe to paste into an LLM or a scoring agent: no team names, people, judges or scores.
+        Preset("ai_evaluation", "AI evaluation", "The project only, keyed by submission code: no team names, people, judges or scores.",
+               ("submission_code", "event", "status", "track", "track_summary", "project", "github", "pitch_deck", "demo", "video", "docs",
+                "description", "judge_answers")),
+        Preset("links", "Links only", "Codes, project names and their links.",
+               ("team_code", "team_name", "submission_code", "project", "github", "pitch_deck", "demo", "video", "docs")),
+    ),
 )
 
 
@@ -501,6 +623,22 @@ DATASETS: dict[str, Dataset] = {
 def datasets_payload() -> list[dict]:
     return [
         {"key": item.key, "label": item.label, "one_row_per": item.one_row_per,
-         "fields": [{"key": column.key, "label": column.label, "default": column.default} for column in item.columns]}
+         "fields": [{"key": column.key, "label": column.label, "default": column.default} for column in item.columns],
+         "presets": [{"key": preset.key, "label": preset.label, "description": preset.description, "fields": list(preset.fields)}
+                     for preset in item.presets],
+         "all_events": item.key == "submissions"}
         for item in DATASETS.values()
     ]
+
+
+def resolve_columns(session: Session, dataset: Dataset, keys, filters: dict) -> list[Column]:
+    """The columns an export writes, in dataset order, with expanding columns replaced by what they stand for."""
+    chosen = [column for column in dataset.columns if column.key in set(keys)] or [column for column in dataset.columns if column.default]
+    result: list[Column] = []
+    seen: set[str] = set()
+    for column in chosen:
+        for item in column.expand(session, filters) if column.expand else [column]:
+            if item.key not in seen:
+                seen.add(item.key)
+                result.append(item)
+    return result
