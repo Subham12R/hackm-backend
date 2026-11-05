@@ -405,7 +405,7 @@ SUBMISSIONS = Dataset(
                 "score", "criteria", "judge_comments", "submitted_at", "updated_at")),
         # Safe to paste into an LLM or a scoring agent: no team names, people, judges or scores.
         Preset("ai_evaluation", "AI evaluation", "The project only, keyed by submission code: no team names, people, judges or scores.",
-               ("submission_code", "event", "track", "track_summary", "project", "github", "pitch_deck", "demo", "video", "docs",
+               ("submission_code", "event", "status", "track", "track_summary", "project", "github", "pitch_deck", "demo", "video", "docs",
                 "description", "judge_answers")),
         Preset("links", "Links only", "Codes, project names and their links.",
                ("team_code", "team_name", "submission_code", "project", "github", "pitch_deck", "demo", "video", "docs")),
