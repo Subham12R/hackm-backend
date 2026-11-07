@@ -19,6 +19,7 @@ from src.communications.templates import action_email
 from src.db.models.identity import User
 from src.db.models.registration import Announcement, AnnouncementRead, Registration
 from src.db.models.stage import Track
+from src.events import resources as protected_resources
 from src.events import stages as stage_rules
 from src.events.service import current_event, event_payload
 from src.payments.service import app_url, refresh_adjustment
@@ -85,6 +86,14 @@ STAGE_FIELDS = {"submission_opens_at": "submission_opens_at", "submission_closes
 class Resource(BaseModel):
     label: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
     url: Annotated[str, StringConstraints(max_length=500), AfterValidator(_web_link)]
+    # Protected: teams see the file inside the dashboard and never get the link (src/events/resources.py).
+    protected: bool = False
+
+    @model_validator(mode="after")
+    def protectable(self):
+        if self.protected and protected_resources.pdf_url(self.url) is None:
+            raise ValueError(protected_resources.UNSUPPORTED)
+        return self
 
 
 class ChallengeUpdate(BaseModel):
