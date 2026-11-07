@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import AfterValidator, BaseModel, EmailStr, Field, StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
@@ -41,6 +41,7 @@ from src.db.models.judging import ResultRow
 from src.db.models.stage import Stage, Track
 from src.events import stages as stage_rules
 from src.events import finals as finals_rules
+from src.events import resources as protected_resources
 from src.events.service import current_event, event_payload
 from src.judging.service import criteria as judging_criteria
 from src.judging.service import released_snapshots
@@ -358,6 +359,23 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 "stages": [_stage_payload(session, stage, submissions.get(stage.id), now) for stage in visible],
             }
 
+    @router.get("/stages/{stage_id}/tracks/{track_id}/resources/{index}")
+    def protected_resource(stage_id: UUID, track_id: UUID, index: int, request: Request, authorization: str = Header()):
+        """A protected resource as a PDF, for teams that can see its problem statement. Its link stays on the server."""
+        session, _user, registration = leader_registration(request, authorization)
+        with session:
+            stage = _team_stage(session, registration, stage_id)
+            track = session.get(Track, track_id)
+            items = (track.resources or []) if track is not None and track.stage_id == stage.id else []
+            visible = _statements_visible(stage, _submission_for(session, registration.id, stage.id), datetime.now(UTC))
+            if not visible or not 0 <= index < len(items) or not items[index].get("protected"):
+                raise HTTPException(404, "resource not found")
+            url = items[index]["url"]
+        data = protected_resources.fetch_pdf(url)
+        return Response(data, media_type="application/pdf", headers={
+            "Cache-Control": "private, no-store", "Content-Disposition": "inline", "X-Content-Type-Options": "nosniff",
+        })
+
     @router.put("/stages/{stage_id}/submission")
     def save_stage_submission(stage_id: UUID, payload: SubmissionRequest, request: Request, authorization: str = Header()):
         session, _user, registration = leader_registration(request, authorization, lock=True)
@@ -508,7 +526,7 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
                 return {"locked": True, "release_at": release_at}
             return {
                 "locked": False, "release_at": release_at, "title": row.title, "summary": row.summary,
-                "body": row.body, "resources": row.resources or [], "version": row.version, "updated_at": row.updated_at.isoformat(),
+                "body": row.body, "resources": protected_resources.participant_resources(row.resources), "version": row.version, "updated_at": row.updated_at.isoformat(),
             }
 
     @router.get("/announcements")
@@ -787,7 +805,8 @@ def _stage_payload(session: Session, stage: Stage, submission: Submission | None
                        "requires_start": released and not visible},
         "timer": stage_rules.timer_payload(stage, started_at, now),
         # Problem statements stay server-side until the reveal time (and, in a timed event, until the team starts).
-        "tracks": [stage_rules.track_payload(track) for track in rows] if visible else [],
+        "tracks": [{**stage_rules.track_payload(track), "resources": protected_resources.participant_resources(track.resources)}
+                   for track in rows] if visible else [],
         "form": submission_form.form_payload(stage),
         "submission": _submission_payload(submission),
     }

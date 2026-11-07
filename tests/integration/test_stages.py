@@ -331,3 +331,51 @@ def test_closed_events_can_be_deleted_with_their_data(stages_cleanup) -> None:
         assert session.get(Stage, side["id"]) is None
         assert session.scalar(select(Submission.id).where(Submission.stage_id == side["id"])) is None
         assert session.get(EvaluationRound, round_["id"]) is None
+
+
+DOC = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz012345/edit?usp=sharing"
+
+
+def test_protected_resources_reach_teams_as_a_pdf_without_their_link(stages_cleanup, monkeypatch) -> None:
+    from src.events import resources
+
+    fetched: list[str] = []
+    monkeypatch.setattr(resources, "_download", lambda source: fetched.append(source) or b"%PDF-1.7 brief")
+    resources.clear_cache()
+    harness = Harness()
+    admin = harness.login(staff(RoleCode.EVENT_ADMIN), "admin")
+    later = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    finals = _finals(harness, admin, stages_cleanup, eligibility="ALL_PAID", statements_release_at=later)
+    tracks = f"/api/v1/admin/stages/{finals['id']}/tracks"
+
+    # Only Google files can be protected; the backend would not fetch anything else.
+    refused = harness.client.post(tracks, headers=admin, json={"title": "Health", "resources": [{"label": "Data", "url": "https://x.org/a.pdf", "protected": True}]})
+    assert refused.status_code == 422 and "Google" in refused.text
+    track = harness.client.post(tracks, headers=admin, json={"title": "Health", "resources": [
+        {"label": "Open data", "url": "https://x.org/data"}, {"label": "Brief", "url": DOC, "protected": True}]}).json()
+    assert track["resources"][1] == {"label": "Brief", "url": DOC, "protected": True}
+
+    _payload, leader = harness.paid_team()
+    pdf = f"/api/v1/participant/stages/{finals['id']}/tracks/{track['id']}/resources"
+    # Nothing before the reveal.
+    assert harness.client.get(f"{pdf}/1", headers=leader).status_code == 404
+    harness.client.patch(f"/api/v1/admin/stages/{finals['id']}", headers=admin, json={"statements_release_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat()})
+
+    stage = next(item for item in harness.client.get("/api/v1/participant/stages", headers=leader).json()["stages"] if item["id"] == finals["id"])
+    assert stage["tracks"][0]["resources"] == [
+        {"label": "Open data", "url": "https://x.org/data", "protected": False, "index": 0},
+        {"label": "Brief", "url": "", "protected": True, "index": 1},
+    ]
+    assert "1AbCdEfGhIjKlMnOpQrStUvWxYz012345" not in harness.client.get("/api/v1/participant/stages", headers=leader).text
+
+    first = harness.client.get(f"{pdf}/1", headers=leader)
+    assert first.status_code == 200 and first.content == b"%PDF-1.7 brief"
+    assert first.headers["content-type"] == "application/pdf" and "no-store" in first.headers["cache-control"]
+    assert harness.client.get(f"{pdf}/1", headers=leader).status_code == 200
+    # One fetch from Google for both views.
+    assert fetched == ["https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz012345/export?format=pdf"]
+    # Open links, missing positions, other tracks and signed-out callers get nothing.
+    assert harness.client.get(f"{pdf}/0", headers=leader).status_code == 404
+    assert harness.client.get(f"{pdf}/5", headers=leader).status_code == 404
+    assert harness.client.get(f"/api/v1/participant/stages/{finals['id']}/tracks/{uuid4()}/resources/1", headers=leader).status_code == 404
+    assert harness.client.get(f"{pdf}/1").status_code in (401, 422)
