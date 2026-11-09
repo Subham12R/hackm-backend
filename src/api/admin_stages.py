@@ -1,6 +1,7 @@
 """Events (stages) inside the hackathon: their schedule, problem statements (tracks) and winners."""
 
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -93,6 +94,15 @@ class AwardRequest(BaseModel):
 class TeamTrackRequest(BaseModel):
     # The track to lock the team into; leave empty to unlock so the team can pick again.
     track_id: UUID | None = None
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=300)]
+
+
+class ExtraTimeRequest(BaseModel):
+    # One team, a few, or every team in the event at once.
+    registration_ids: list[UUID] = Field(min_length=1, max_length=1000)
+    # "add" puts these minutes on top of what each team already has; "set" makes it each team's total (0 takes it away).
+    mode: Literal["add", "set"] = "add"
+    minutes: int = Field(ge=0, le=stage_rules.MAX_EXTRA_MINUTES)
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=300)]
 
 
@@ -334,6 +344,59 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
             request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             return _team_track_payload(submission, track)
 
+    @router.put("/stages/{stage_id}/extra-time")
+    def set_extra_time(stage_id: UUID, payload: ExtraTimeRequest, request: Request, authorization: str = Header()):
+        """Give teams extra time to submit past the event close (and past their own clock in a timed event).
+
+        The extra time moves only these teams' cut-offs; everyone else keeps the event's schedule. It does not reopen
+        a final submission; reopen that separately so the team can edit again.
+        """
+        session, actor = authenticated_user(request, authorization, public_key, EVENT_CONTROL_ROLES)
+        with session:
+            stage = stage_rules.get_stage(session, stage_id, current_event(session).id)
+            if payload.mode == "add" and payload.minutes == 0:
+                raise HTTPException(422, "give at least one minute of extra time")
+            ids = list(dict.fromkeys(payload.registration_ids))
+            registrations = {
+                row.id: row for row in session.scalars(select(Registration).where(Registration.id.in_(ids)).with_for_update())
+            }
+            missing = [str(item) for item in ids if item not in registrations
+                       or registrations[item].event_id != stage.event_id or not stage_rules.is_eligible(stage, registrations[item])]
+            if missing:
+                raise HTTPException(404, f"{len(missing)} team(s) are not in this event")
+            submissions = {
+                row.registration_id: row for row in session.scalars(
+                    select(Submission).where(Submission.stage_id == stage.id, Submission.registration_id.in_(ids)).with_for_update())
+            }
+            now = datetime.now(UTC)
+            timezone = ZoneInfo(current_event(session).timezone)
+            changed = []
+            for registration_id in ids:
+                submission = submissions.get(registration_id)
+                before = (submission.extra_minutes or 0) if submission else 0
+                after = min(before + payload.minutes, stage_rules.MAX_EXTRA_MINUTES) if payload.mode == "add" else payload.minutes
+                if after == before:
+                    continue
+                if submission is None:
+                    submission = Submission(registration_id=registration_id, stage_id=stage.id, status="DRAFT", version=0, answers={})
+                    session.add(submission)
+                    submissions[registration_id] = submission
+                submission.extra_minutes = after
+                audit(session, actor, "Changed extra time" if after else "Removed extra time", "submission", team_code(registration_id),
+                      event=stage.name, previous_minutes=before, extra_minutes=after, reason=payload.reason)
+                changed.append((registration_id, submission, after))
+            session.commit()
+            for registration_id, submission, after in changed:
+                closes = stage_rules.personal_deadline(stage, submission.started_at, after) or stage_rules.team_closes_at(stage, after)
+                when = f" You can now submit until {closes.astimezone(timezone):%d %b %Y, %I:%M %p %Z}." if closes else ""
+                final = " Your submission is final; ask the organisers to reopen it if you need to edit." if submission.status == "SUBMITTED" else ""
+                realtime.notify(request, realtime.team_channel(registration_id), realtime.message(
+                    "timer", "Organisers gave you extra time" if after else "Your extra time was removed",
+                    f"{stage.name}:{when or ' the normal schedule applies again.'}{final}", "IMPORTANT", refresh=["stages", "dashboard"]))
+            if changed:
+                request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            return {"changed": len(changed), "teams": [_extra_time_payload(stage, submissions.get(item), now) | {"registration_id": str(item)} for item in ids]}
+
     @router.post("/submissions/{submission_id}/awards", status_code=201)
     def add_award(submission_id: UUID, payload: AwardRequest, request: Request, authorization: str = Header()):
         session, actor = authenticated_user(request, authorization, public_key, ASSIGNMENT_ROLES)
@@ -389,6 +452,16 @@ def _track(session, track_id: UUID, lock: bool = False) -> Track:
         raise HTTPException(404, "problem statement not found")
     stage_rules.get_stage(session, track.stage_id, current_event(session).id)
     return track
+
+
+def _extra_time_payload(stage: Stage, submission: Submission | None, now: datetime) -> dict:
+    extra = (submission.extra_minutes or 0) if submission else 0
+    return {
+        "extra_minutes": extra, "closes_at": stage_rules.window_payload(stage, now, extra)["closes_at"],
+        "window_state": stage_rules.submission_state(stage, now, extra),
+        "timer": stage_rules.timer_payload(stage, submission.started_at if submission else None, now, extra),
+        "submission_status": submission.status if submission else "NOT_STARTED",
+    }
 
 
 def _team_track_payload(submission: Submission | None, track: Track | None) -> dict:

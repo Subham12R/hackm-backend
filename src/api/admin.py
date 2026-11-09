@@ -248,6 +248,7 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
             rows = []
             for registration, submission in pairs:
                 judges = assignments.get(registration.id, [])
+                extra = (submission.extra_minutes or 0) if submission else 0
                 rows.append({
                     "team_id": team_code(registration.id),
                     "registration_id": str(registration.id),
@@ -259,7 +260,11 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
                     "track": {"id": str(submission.track_id), "title": track_names.get(submission.track_id, "")} if submission and submission.track_id else None,
                     "track_locked_at": submission.track_locked_at.isoformat() if submission and submission.track_locked_at else None,
                     # Timed events: when the team started its clock and its own cut-off.
-                    "timer": stage_rules.timer_payload(stage, submission.started_at if submission else None, now),
+                    "timer": stage_rules.timer_payload(stage, submission.started_at if submission else None, now, extra),
+                    # Extra time organisers gave this team, and when the event closes for it.
+                    "extra_minutes": extra,
+                    "closes_at": stage_rules.window_payload(stage, now, extra)["closes_at"],
+                    "window_state": stage_rules.submission_state(stage, now, extra),
                     "links": _submission_links(submission),
                     "answers": submission_form.admin_answers(stage, submission),
                     "start_time": registration.created_at.isoformat(),
@@ -275,7 +280,8 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
                 })
             return {
                 "submissions": rows, "round": _round_row(round_) if round_ else None,
-                "stage": {"id": str(stage.id), "name": stage.name, "eligibility": stage.eligibility},
+                "stage": {"id": str(stage.id), "name": stage.name, "eligibility": stage.eligibility,
+                          "submission_window": stage_rules.window_payload(stage, now), "time_limit_minutes": stage.time_limit_minutes},
                 "tracks": [{"id": str(track.id), "title": track.title} for track in stage_tracks],
             }
 

@@ -44,10 +44,23 @@ def tracks(session: Session, stage_id) -> list[Track]:
     return list(session.scalars(select(Track).where(Track.stage_id == stage_id).order_by(Track.position, Track.updated_at)))
 
 
-def submission_state(stage: Stage, now: datetime) -> str:
+# Most extra time an organiser can give one team in one event (7 days).
+MAX_EXTRA_MINUTES = 7 * 24 * 60
+
+
+def team_closes_at(stage: Stage, extra_minutes: int = 0) -> datetime | None:
+    """When the event closes for one team: the event's close plus any extra time organisers gave it."""
+    if stage.submission_closes_at is None:
+        return None
+    return stage.submission_closes_at + timedelta(minutes=extra_minutes or 0)
+
+
+def submission_state(stage: Stage, now: datetime, extra_minutes: int = 0) -> str:
+    """NOT_OPEN, OPEN or CLOSED; pass a team's extra minutes to get the state for that team."""
     if stage.submission_opens_at is not None and now < stage.submission_opens_at:
         return "NOT_OPEN"
-    if stage.submission_closes_at is not None and now >= stage.submission_closes_at:
+    closes = team_closes_at(stage, extra_minutes)
+    if closes is not None and now >= closes:
         return "CLOSED"
     return "OPEN"
 
@@ -60,8 +73,9 @@ def is_timed(stage: Stage) -> bool:
     return bool(stage.time_limit_minutes)
 
 
-def personal_deadline(stage: Stage, started_at: datetime | None) -> datetime | None:
-    """A team's own cut-off in a timed event: its time limit from when it started, never later than the event closes.
+def personal_deadline(stage: Stage, started_at: datetime | None, extra_minutes: int = 0) -> datetime | None:
+    """A team's own cut-off in a timed event: its time limit from when it started, never later than the event closes,
+    then pushed back by any extra time organisers gave the team.
 
     Starting 24 hours before the close leaves 24 hours, not the full limit.
     """
@@ -70,38 +84,38 @@ def personal_deadline(stage: Stage, started_at: datetime | None) -> datetime | N
     deadline = started_at + timedelta(minutes=stage.time_limit_minutes)
     if stage.submission_closes_at is not None:
         deadline = min(deadline, stage.submission_closes_at)
-    return deadline
+    return deadline + timedelta(minutes=extra_minutes or 0)
 
 
-def timer_state(stage: Stage, started_at: datetime | None, now: datetime) -> str:
+def timer_state(stage: Stage, started_at: datetime | None, now: datetime, extra_minutes: int = 0) -> str:
     """UNTIMED, NOT_STARTED, RUNNING or EXPIRED."""
     if not is_timed(stage):
         return "UNTIMED"
     if started_at is None:
-        return "EXPIRED" if submission_state(stage, now) == "CLOSED" else "NOT_STARTED"
-    return "RUNNING" if now < personal_deadline(stage, started_at) else "EXPIRED"
+        return "EXPIRED" if submission_state(stage, now, extra_minutes) == "CLOSED" else "NOT_STARTED"
+    return "RUNNING" if now < personal_deadline(stage, started_at, extra_minutes) else "EXPIRED"
 
 
-def can_start(stage: Stage, now: datetime) -> str | None:
+def can_start(stage: Stage, now: datetime, extra_minutes: int = 0) -> str | None:
     """Why a team cannot start its clock yet, or None when it can."""
     if not is_timed(stage):
         return "this event has no per-team timer"
     if not statements_released(stage, now):
         return "the problem statements are not out yet"
-    if submission_state(stage, now) == "CLOSED":
+    if submission_state(stage, now, extra_minutes) == "CLOSED":
         return "this event has closed"
     return None
 
 
-def timer_payload(stage: Stage, started_at: datetime | None, now: datetime) -> dict | None:
+def timer_payload(stage: Stage, started_at: datetime | None, now: datetime, extra_minutes: int = 0) -> dict | None:
     if not is_timed(stage):
         return None
-    deadline = personal_deadline(stage, started_at)
+    deadline = personal_deadline(stage, started_at, extra_minutes)
     # What a team would get if it started right now, so the start button can say so.
-    preview = personal_deadline(stage, now) if started_at is None and can_start(stage, now) is None else None
+    preview = personal_deadline(stage, now, extra_minutes) if started_at is None and can_start(stage, now, extra_minutes) is None else None
     return {
-        "limit_minutes": stage.time_limit_minutes, "started_at": _iso(started_at), "deadline": _iso(deadline),
-        "deadline_if_started_now": _iso(preview), "state": timer_state(stage, started_at, now),
+        "limit_minutes": stage.time_limit_minutes, "extra_minutes": extra_minutes or 0, "started_at": _iso(started_at), "deadline": _iso(deadline),
+        "deadline_if_started_now": _iso(preview), "state": timer_state(stage, started_at, now, extra_minutes),
     }
 
 
@@ -133,8 +147,13 @@ def placement_label(placement: int) -> str:
     return PLACEMENT_LABELS.get(placement, f"{placement}th place")
 
 
-def window_payload(stage: Stage, now: datetime) -> dict:
-    return {"opens_at": _iso(stage.submission_opens_at), "closes_at": _iso(stage.submission_closes_at), "state": submission_state(stage, now)}
+def window_payload(stage: Stage, now: datetime, extra_minutes: int = 0) -> dict:
+    """The submission window; for one team, `closes_at` includes its extra time and `event_closes_at` is everyone's close."""
+    return {
+        "opens_at": _iso(stage.submission_opens_at), "closes_at": _iso(team_closes_at(stage, extra_minutes)),
+        "event_closes_at": _iso(stage.submission_closes_at), "extra_minutes": extra_minutes or 0,
+        "state": submission_state(stage, now, extra_minutes),
+    }
 
 
 def track_payload(track: Track) -> dict:
