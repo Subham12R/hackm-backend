@@ -399,12 +399,12 @@ def participant_router(public_key: Ed25519PublicKey) -> APIRouter:
             now = datetime.now(UTC)
             submission = _submission_for(session, registration.id, stage.id, lock=True)
             if submission is None or submission.started_at is None:
-                reason = stage_rules.can_start(stage, now)
+                reason = stage_rules.can_start(stage, now, _extra(submission))
                 if reason is not None:
                     raise HTTPException(409, reason)
                 submission = _editable_submission(session, registration.id, stage.id)
                 submission.started_at = now
-                deadline = stage_rules.personal_deadline(stage, now)
+                deadline = stage_rules.personal_deadline(stage, now, _extra(submission))
                 audit(session, user, "Started event timer", "registration", registration.id, event=stage.name, deadline=deadline.isoformat())
                 session.commit()
                 request.app.state.cache.invalidate(ADMIN_AGGREGATES)
@@ -651,6 +651,16 @@ def _submission_for(session: Session, registration_id, stage_id, lock: bool = Fa
     return session.scalar(query.with_for_update() if lock else query)
 
 
+def _extra(submission: Submission | None) -> int:
+    """Extra minutes organisers gave this team in the submission's event."""
+    return (submission.extra_minutes or 0) if submission is not None else 0
+
+
+def _team_state(session: Session, registration: Registration, stage: Stage, now: datetime) -> str:
+    """The submission window's state for this team, counting any extra time it was given."""
+    return stage_rules.submission_state(stage, now, _extra(_submission_for(session, registration.id, stage.id)))
+
+
 def _statements_visible(stage: Stage, submission: Submission | None, now: datetime) -> bool:
     """Released statements, and in a timed event only once this team has started its clock."""
     if not stage_rules.statements_released(stage, now):
@@ -667,7 +677,7 @@ def _require_clock(session: Session, registration: Registration, stage: Stage, n
     if started is None:
         raise HTTPException(409, "start the event's timer first; the problem statements open when you do")
     # The event closing is caught earlier ("submission is closed"); this is the team's own limit running out.
-    if now >= stage_rules.personal_deadline(stage, started):
+    if now >= stage_rules.personal_deadline(stage, started, _extra(submission)):
         raise HTTPException(403, f"your {round(stage.time_limit_minutes / 60)} hours are up; the submission is locked")
 
 
@@ -687,7 +697,7 @@ def _lock_track(submission: Submission, track_id: UUID, now: datetime) -> None:
 
 def _choose_track(session: Session, request: Request, user: User, registration: Registration, stage: Stage, track_id: UUID) -> dict:
     now = datetime.now(UTC)
-    if stage_rules.submission_state(stage, now) == "CLOSED":
+    if _team_state(session, registration, stage, now) == "CLOSED":
         raise HTTPException(403, "submission is closed")
     _require_clock(session, registration, stage, now)
     track = _stage_track(session, stage, track_id, now)
@@ -708,7 +718,7 @@ def _choose_track(session: Session, request: Request, user: User, registration: 
 
 def _save_submission(session: Session, request: Request, registration: Registration, stage: Stage, payload: SubmissionRequest) -> dict:
     now = datetime.now(UTC)
-    if stage_rules.submission_state(stage, now) == "CLOSED":
+    if _team_state(session, registration, stage, now) == "CLOSED":
         raise HTTPException(403, "submission is closed")
     _require_clock(session, registration, stage, now)
     chosen = _stage_track(session, stage, payload.track_id, now) if payload.track_id is not None else None
@@ -745,7 +755,7 @@ def _save_submission(session: Session, request: Request, registration: Registrat
 
 
 def _finalize_submission(session: Session, request: Request, user: User, registration: Registration, stage: Stage) -> dict:
-    state = stage_rules.submission_state(stage, datetime.now(UTC))
+    state = _team_state(session, registration, stage, datetime.now(UTC))
     if state == "NOT_OPEN":
         raise HTTPException(403, "submission is not open yet")
     if state == "CLOSED":
@@ -796,14 +806,15 @@ def _stage_payload(session: Session, stage: Stage, submission: Submission | None
     visible = _statements_visible(stage, submission, now)
     rows = stage_rules.tracks(session, stage.id)
     started_at = submission.started_at if submission is not None else None
+    extra = _extra(submission)
     return {
         "id": str(stage.id), "name": stage.name, "description": stage.description, "eligibility": stage.eligibility,
-        "submission_window": stage_rules.window_payload(stage, now),
+        "submission_window": stage_rules.window_payload(stage, now, extra),
         "statements": {"release_at": stage.statements_release_at.isoformat() if stage.statements_release_at else None,
                        "released": released, "count": len(rows),
                        # Timed events: statements are out, but this team opens them by starting its clock.
                        "requires_start": released and not visible},
-        "timer": stage_rules.timer_payload(stage, started_at, now),
+        "timer": stage_rules.timer_payload(stage, started_at, now, extra),
         # Problem statements stay server-side until the reveal time (and, in a timed event, until the team starts).
         "tracks": [{**stage_rules.track_payload(track), "resources": protected_resources.participant_resources(track.resources)}
                    for track in rows] if visible else [],

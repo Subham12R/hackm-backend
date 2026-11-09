@@ -254,6 +254,8 @@ class Submission(Base):
     track_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # When the team started a timed event's clock; problem statements and its personal deadline follow from it.
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Extra minutes organisers gave this team past the event close (and past its own clock in a timed event).
+    extra_minutes: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     status: Mapped[str] = mapped_column(String(40), default="DRAFT")
     project_name: Mapped[str] = mapped_column(String(200), default="")
     github_url: Mapped[str] = mapped_column(String(500), default="")

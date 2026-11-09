@@ -3,15 +3,18 @@
 import re
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, select, update
 
 from src.auth.policies import RoleCode
+from src.db.models.identity import AuditLog
 from src.db.models.media import SiteNotice
 from src.db.models.registration import Event, Registration, RegistrationMember, Submission
 from src.db.models.stage import Stage
 from src.events.service import ACTIVE_EVENT_ID
+from src.operations import team_code
 from src.registrations.pricing import apply_discount, processing_fee_ppm, with_processing_fee
 from tests.helpers import Harness, db, registration_payload, staff
 
@@ -251,6 +254,85 @@ def test_a_team_cannot_start_before_the_statements_are_out(timed_stage) -> None:
     # Clearing the limit makes the event untimed again.
     cleared = harness.client.patch(f"/api/v1/admin/stages/{stage['id']}", headers=admin, json={"time_limit_minutes": None})
     assert cleared.status_code == 200 and cleared.json()["time_limit_minutes"] is None
+
+
+def _team_id(harness: Harness, admin: dict, stage_id: str, team_name: str) -> str:
+    rows = harness.client.get("/api/v1/admin/submissions", headers=admin, params={"stage_id": stage_id}).json()["submissions"]
+    return next(row["registration_id"] for row in rows if row["team_name"] == team_name)
+
+
+def test_extra_time_lets_one_team_submit_after_the_event_closes(timed_stage) -> None:
+    harness = Harness()
+    admin = harness.login(staff(RoleCode.EVENT_ADMIN), "admin")
+    now = datetime.now(UTC)
+    # An untimed event that closed ten minutes ago.
+    stage = _timed(harness, admin, timed_stage, time_limit_minutes=None, submission_closes_at=(now - timedelta(minutes=10)).isoformat())
+    late, late_leader = harness.paid_team()
+    _other, other_leader = harness.paid_team()
+    url = f"/api/v1/participant/stages/{stage['id']}"
+    assert harness.client.put(f"{url}/submission", headers=late_leader, json=_project()).status_code == 403
+    team = _team_id(harness, admin, stage["id"], late["team_name"])
+
+    path = f"/api/v1/admin/stages/{stage['id']}/extra-time"
+    body = {"registration_ids": [team], "minutes": 30, "reason": "Wi-Fi outage at their venue"}
+    reviewer = harness.login(staff(RoleCode.VIEWER), "admin")
+    assert harness.client.put(path, headers=reviewer, json=body).status_code == 403
+    assert harness.client.put(path, headers=admin, json={**body, "reason": ""}).status_code == 422
+    granted = harness.client.put(path, headers=admin, json=body)
+    assert granted.status_code == 200, granted.text
+    assert granted.json()["changed"] == 1 and granted.json()["teams"][0]["extra_minutes"] == 30
+    assert granted.json()["teams"][0]["window_state"] == "OPEN"
+
+    view = _view(harness, late_leader, stage["id"])
+    window = view["submission_window"]
+    assert window["state"] == "OPEN" and window["extra_minutes"] == 30 and window["event_closes_at"] == stage["submission_window"]["closes_at"]
+    assert datetime.fromisoformat(window["closes_at"]) - datetime.fromisoformat(window["event_closes_at"]) == timedelta(minutes=30)
+    assert harness.client.put(f"{url}/submission", headers=late_leader, json=_project()).status_code == 200
+    assert harness.client.post(f"{url}/submission/finalize", headers=late_leader).status_code == 200
+    # Every other team keeps the event's schedule.
+    assert _view(harness, other_leader, stage["id"])["submission_window"]["state"] == "CLOSED"
+    assert harness.client.put(f"{url}/submission", headers=other_leader, json=_project()).status_code == 403
+
+    # "add" stacks; the admin table shows each team's own close.
+    harness.client.put(path, headers=admin, json={**body, "minutes": 15})
+    row = next(item for item in harness.client.get("/api/v1/admin/submissions", headers=admin, params={"stage_id": stage["id"]}).json()["submissions"]
+               if item["registration_id"] == team)
+    assert row["extra_minutes"] == 45 and row["window_state"] == "OPEN"
+    # Setting 0 takes it away again.
+    removed = harness.client.put(path, headers=admin, json={**body, "mode": "set", "minutes": 0})
+    assert removed.json()["teams"][0]["extra_minutes"] == 0 and removed.json()["teams"][0]["window_state"] == "CLOSED"
+    with db() as session:
+        logged = session.scalars(select(AuditLog.action).where(AuditLog.target_id == team_code(UUID(team)))).all()
+    assert "Changed extra time" in logged and "Removed extra time" in logged
+
+
+def test_extra_time_extends_a_timed_teams_own_clock_and_works_for_many_teams(timed_stage) -> None:
+    harness = Harness()
+    admin = harness.login(staff(RoleCode.EVENT_ADMIN), "admin")
+    stage = _timed(harness, admin, timed_stage, submission_closes_at=(datetime.now(UTC) + timedelta(days=5)).isoformat())
+    first, leader = harness.paid_team()
+    second, _second_leader = harness.paid_team()
+    url = f"/api/v1/participant/stages/{stage['id']}"
+    assert harness.client.post(f"{url}/start", headers=leader).status_code == 200
+    with db() as session:
+        session.execute(update(Submission).where(Submission.stage_id == stage["id"]).values(started_at=datetime.now(UTC) - timedelta(hours=49)))
+        session.commit()
+    assert harness.client.put(f"{url}/submission", headers=leader, json=_project()).status_code == 403
+
+    teams = [_team_id(harness, admin, stage["id"], item["team_name"]) for item in (first, second)]
+    granted = harness.client.put(f"/api/v1/admin/stages/{stage['id']}/extra-time", headers=admin,
+                                 json={"registration_ids": teams, "minutes": 120, "reason": "Judges' briefing ran over"})
+    assert granted.status_code == 200 and granted.json()["changed"] == 2
+    view = _view(harness, leader, stage["id"])
+    assert view["timer"]["state"] == "RUNNING" and view["timer"]["extra_minutes"] == 120
+    assert harness.client.put(f"{url}/submission", headers=leader, json=_project()).status_code == 200
+    # The team that never started keeps its full limit and gets the extra on top when it does.
+    not_started = next(item for item in granted.json()["teams"] if item["registration_id"] == teams[1])
+    assert not_started["timer"]["state"] == "NOT_STARTED" and not_started["timer"]["extra_minutes"] == 120
+
+    unknown = harness.client.put(f"/api/v1/admin/stages/{stage['id']}/extra-time", headers=admin,
+                                 json={"registration_ids": [str(uuid4())], "minutes": 10, "reason": "typo check"})
+    assert unknown.status_code == 404
 
 
 def test_site_notices_are_managed_by_organisers_and_shown_most_important_first() -> None:
