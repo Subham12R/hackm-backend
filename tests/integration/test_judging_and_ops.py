@@ -71,7 +71,8 @@ def test_multi_judge_round_is_anonymous_and_results_stay_private_until_release()
     assert generated.status_code == 200
     rows = {row["project_name"]: row for row in generated.json()["snapshot"]["rows"]}
     strong_row, weak_row = rows[strong_name], rows[weak_name]
-    assert strong_row["score"] == 93.33 and strong_row["evaluations"] == 2
+    # (9*2 + 5*1) / (10*2 + 5*1) = 92%
+    assert strong_row["score"] == 92.0 and strong_row["evaluations"] == 2
     assert strong_row["rank"] < weak_row["rank"]
     assert harness.client.post(f"/api/v1/admin/rounds/{round_id}/results/release", headers=event_admin).status_code == 409
     mine = harness.client.get("/api/v1/participant/results", headers=strong_leader).json()
