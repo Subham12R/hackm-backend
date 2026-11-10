@@ -106,11 +106,18 @@ def validate_scores(rubric: list[EvaluationCriterion], scores: dict[str, int], c
 
 
 def scorecard_total(rubric: list[EvaluationCriterion], scores: dict[str, int]) -> float:
-    """Weighted percentage, 0-100, so rounds with different rubrics stay comparable."""
-    weight = sum(criterion.weight for criterion in rubric)
-    if not weight:
+    """Weighted points earned as a percentage of the weighted maximum, 0-100.
+
+    Each criterion contributes its own points times its weight, so a rubric whose
+    max scores already add up to 100 (with equal weights) reads as points earned:
+    33 out of 100 is 33%. Normalising each score by its maximum first would make
+    the percentage depend on the number of criteria instead of the points scored.
+    """
+    maximum = sum(criterion.max_score * criterion.weight for criterion in rubric)
+    if not maximum:
         return 0.0
-    return round(sum(scores.get(criterion.key, 0) / criterion.max_score * criterion.weight for criterion in rubric) / weight * 100, 2)
+    earned = sum(scores.get(criterion.key, 0) * criterion.weight for criterion in rubric)
+    return round(earned / maximum * 100, 2)
 
 
 @dataclass
