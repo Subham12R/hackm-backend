@@ -8293,6 +8293,83 @@
         "description": "**Roles:** `SUPER_ADMIN`, `EVENT_ADMIN`, `REGISTRATION_ADMIN`"
       }
     },
+    "/api/v1/admin/teams/bulk-review": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Bulk Review Teams",
+        "description": "**Roles:** `SUPER_ADMIN`, `EVENT_ADMIN`, `REGISTRATION_ADMIN`\n\nMark many teams' details verified, declined or pending in one go.",
+        "operationId": "bulk_review_teams_api_v1_admin_teams_bulk_review_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkTeamReviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed: FastAPI's `detail` list for bad fields, or a `detail` string for a business rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid access token (`invalid access token`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the role is not allowed (`admin access required`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-roles": [
+          "SUPER_ADMIN",
+          "EVENT_ADMIN",
+          "REGISTRATION_ADMIN"
+        ]
+      }
+    },
     "/api/v1/admin/evaluators": {
       "get": {
         "tags": [
@@ -12337,7 +12414,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BulkRequest"
+                "$ref": "#/components/schemas/src__api__admin_payments__BulkRequest"
               },
               "example": {
                 "action": "delete",
@@ -20113,6 +20190,82 @@
         "description": "**Roles:** `SUPER_ADMIN`, `EVENT_ADMIN`"
       }
     },
+    "/api/v1/admin/gallery/bulk": {
+      "post": {
+        "tags": [
+          "admin-gallery"
+        ],
+        "summary": "Bulk Photos",
+        "description": "**Roles:** `SUPER_ADMIN`, `EVENT_ADMIN`\n\nShow, hide or delete many photos at once.",
+        "operationId": "bulk_photos_api_v1_admin_gallery_bulk_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkPhotosRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed: FastAPI's `detail` list for bad fields, or a `detail` string for a business rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid access token (`invalid access token`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the role is not allowed (`admin access required`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-roles": [
+          "SUPER_ADMIN",
+          "EVENT_ADMIN"
+        ]
+      }
+    },
     "/api/v1/admin/gallery/{photo_id}": {
       "patch": {
         "tags": [
@@ -25622,6 +25775,83 @@
         "description": "**Roles:** `SUPER_ADMIN`, `EVENT_ADMIN`, `REGISTRATION_ADMIN`"
       }
     },
+    "/api/v1/admin/teams/bulk-finals": {
+      "post": {
+        "tags": [
+          "admin-checkin"
+        ],
+        "summary": "Bulk Decide Finals",
+        "description": "**Roles:** `SUPER_ADMIN`, `EVENT_ADMIN`, `REGISTRATION_ADMIN`\n\nOne finals decision for many teams; teams it cannot apply to are skipped and listed, the rest still change.",
+        "operationId": "bulk_decide_finals_api_v1_admin_teams_bulk_finals_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkFinalsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed: FastAPI's `detail` list for bad fields, or a `detail` string for a business rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid access token (`invalid access token`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the role is not allowed (`admin access required`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-roles": [
+          "SUPER_ADMIN",
+          "EVENT_ADMIN",
+          "REGISTRATION_ADMIN"
+        ]
+      }
+    },
     "/api/v1/admin/finals": {
       "get": {
         "tags": [
@@ -30786,6 +31016,181 @@
         "description": "**Roles:** `SUPER_ADMIN`, `EVENT_ADMIN`, `REGISTRATION_ADMIN`, `EVALUATION_ADMIN`, `SUPPORT_ADMIN`, `VIEWER`"
       }
     },
+    "/api/v1/admin/credentials/manifest": {
+      "get": {
+        "tags": [
+          "admin-credentials"
+        ],
+        "summary": "Credential Manifest",
+        "description": "**Roles:** `SUPER_ADMIN`, `EVENT_ADMIN`, `REGISTRATION_ADMIN`, `EVALUATION_ADMIN`, `SUPPORT_ADMIN`, `VIEWER`\n\nEvery credential matching the list's filters in one compact page, for selecting across pages and bulk downloads.",
+        "operationId": "credential_manifest_api_v1_admin_credentials_manifest_get",
+        "parameters": [
+          {
+            "name": "stage_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Stage Id"
+            }
+          },
+          {
+            "name": "certificate_type_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Certificate Type Id"
+            }
+          },
+          {
+            "name": "badge_definition_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Badge Definition Id"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "CERTIFICATE",
+                    "BADGE"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "DRAFT",
+                    "PUBLISHED",
+                    "REVOKED"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "default": "",
+              "title": "Q"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed: FastAPI's `detail` list for bad fields, or a `detail` string for a business rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid access token (`invalid access token`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the role is not allowed (`admin access required`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-roles": [
+          "SUPER_ADMIN",
+          "EVENT_ADMIN",
+          "REGISTRATION_ADMIN",
+          "EVALUATION_ADMIN",
+          "SUPPORT_ADMIN",
+          "VIEWER"
+        ]
+      }
+    },
     "/api/v1/admin/credentials/publish": {
       "post": {
         "tags": [
@@ -31411,6 +31816,158 @@
           "EVENT_ADMIN"
         ],
         "description": "**Roles:** `SUPER_ADMIN`, `EVENT_ADMIN`"
+      }
+    },
+    "/api/v1/admin/credentials/bulk-delete": {
+      "post": {
+        "tags": [
+          "admin-credentials"
+        ],
+        "summary": "Bulk Delete Credentials",
+        "description": "**Roles:** `SUPER_ADMIN`, `EVENT_ADMIN`\n\nDelete the drafts among the chosen credentials; anything already published is skipped (revoke it instead).",
+        "operationId": "bulk_delete_credentials_api_v1_admin_credentials_bulk_delete_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/src__api__admin_credentials__BulkRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed: FastAPI's `detail` list for bad fields, or a `detail` string for a business rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid access token (`invalid access token`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the role is not allowed (`admin access required`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-roles": [
+          "SUPER_ADMIN",
+          "EVENT_ADMIN"
+        ]
+      }
+    },
+    "/api/v1/admin/credentials/bulk-revoke": {
+      "post": {
+        "tags": [
+          "admin-credentials"
+        ],
+        "summary": "Bulk Revoke Credentials",
+        "description": "**Roles:** `SUPER_ADMIN`, `EVENT_ADMIN`\n\nRevoke the published credentials among the chosen ones with one reason; drafts and revoked ones are skipped.",
+        "operationId": "bulk_revoke_credentials_api_v1_admin_credentials_bulk_revoke_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkRevokeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed: FastAPI's `detail` list for bad fields, or a `detail` string for a business rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid access token (`invalid access token`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the role is not allowed (`admin access required`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-roles": [
+          "SUPER_ADMIN",
+          "EVENT_ADMIN"
+        ]
       }
     },
     "/api/v1/judge/assignments": {
@@ -32879,33 +33436,118 @@
         "title": "BulkAssignmentRequest",
         "description": "Assign or remove judges on many teams in one go (the Submissions table's bulk bar)."
       },
-      "BulkRequest": {
+      "BulkFinalsRequest": {
         "properties": {
-          "action": {
+          "status": {
             "type": "string",
             "enum": [
-              "cancel",
-              "delete"
+              "PENDING",
+              "ACCEPTED",
+              "DECLINED"
             ],
-            "title": "Action"
+            "title": "Status"
           },
+          "registration_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 2000,
+            "minItems": 1,
+            "title": "Registration Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "registration_ids"
+        ],
+        "title": "BulkFinalsRequest"
+      },
+      "BulkPhotosRequest": {
+        "properties": {
           "ids": {
             "items": {
               "type": "string",
               "format": "uuid"
             },
             "type": "array",
-            "maxItems": 200,
+            "maxItems": 1000,
             "minItems": 1,
             "title": "Ids"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "show",
+              "hide",
+              "delete"
+            ],
+            "title": "Action"
           }
         },
         "type": "object",
         "required": [
-          "action",
-          "ids"
+          "ids",
+          "action"
         ],
-        "title": "BulkRequest"
+        "title": "BulkPhotosRequest"
+      },
+      "BulkRevokeRequest": {
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 5000,
+            "minItems": 1,
+            "title": "Ids"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ids",
+          "reason"
+        ],
+        "title": "BulkRevokeRequest"
+      },
+      "BulkTeamReviewRequest": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "VERIFIED",
+              "DECLINED"
+            ],
+            "title": "Status"
+          },
+          "registration_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 2000,
+            "minItems": 1,
+            "title": "Registration Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "registration_ids"
+        ],
+        "title": "BulkTeamReviewRequest"
       },
       "CampaignRequest": {
         "properties": {
@@ -35322,6 +35964,24 @@
               }
             ],
             "title": "Time Limit Minutes"
+          },
+          "statement_mode": {
+            "type": "string",
+            "enum": [
+              "REVEAL",
+              "SELECT"
+            ],
+            "title": "Statement Mode",
+            "default": "REVEAL"
+          },
+          "timer_start": {
+            "type": "string",
+            "enum": [
+              "REVEAL",
+              "OPEN"
+            ],
+            "title": "Timer Start",
+            "default": "REVEAL"
           }
         },
         "type": "object",
@@ -35444,6 +36104,36 @@
               }
             ],
             "title": "Time Limit Minutes"
+          },
+          "statement_mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "REVEAL",
+                  "SELECT"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statement Mode"
+          },
+          "timer_start": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "REVEAL",
+                  "OPEN"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timer Start"
           }
         },
         "type": "object",
@@ -35756,6 +36446,25 @@
         ],
         "title": "ValidationError"
       },
+      "src__api__admin_credentials__BulkRequest": {
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 5000,
+            "minItems": 1,
+            "title": "Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ids"
+        ],
+        "title": "BulkRequest"
+      },
       "src__api__admin_credentials__UploadRequest": {
         "properties": {
           "purpose": {
@@ -35824,6 +36533,34 @@
           "size_bytes"
         ],
         "title": "UploadRequest"
+      },
+      "src__api__admin_payments__BulkRequest": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "cancel",
+              "delete"
+            ],
+            "title": "Action"
+          },
+          "ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "action",
+          "ids"
+        ],
+        "title": "BulkRequest"
       },
       "ApiError": {
         "type": "object",

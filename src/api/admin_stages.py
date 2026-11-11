@@ -43,6 +43,8 @@ class StageRequest(BaseModel):
     submission_closes_at: datetime | None = None
     statements_release_at: datetime | None = None
     time_limit_minutes: TimeLimit | None = None
+    statement_mode: Literal["REVEAL", "SELECT"] = "REVEAL"
+    timer_start: Literal["REVEAL", "OPEN"] = "REVEAL"
 
     @model_validator(mode="after")
     def timezone_aware(self):
@@ -63,6 +65,8 @@ class StageUpdate(BaseModel):
     submission_closes_at: datetime | None = None
     statements_release_at: datetime | None = None
     time_limit_minutes: TimeLimit | None = None
+    statement_mode: Literal["REVEAL", "SELECT"] | None = None
+    timer_start: Literal["REVEAL", "OPEN"] | None = None
 
     @model_validator(mode="after")
     def timezone_aware(self):
@@ -387,7 +391,7 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
                 changed.append((registration_id, submission, after))
             session.commit()
             for registration_id, submission, after in changed:
-                closes = stage_rules.personal_deadline(stage, submission.started_at, after) or stage_rules.team_closes_at(stage, after)
+                closes = stage_rules.personal_deadline(stage, stage_rules.clock_started_at(stage, submission.started_at, now), after) or stage_rules.team_closes_at(stage, after)
                 when = f" You can now submit until {closes.astimezone(timezone):%d %b %Y, %I:%M %p %Z}." if closes else ""
                 final = " Your submission is final; ask the organisers to reopen it if you need to edit." if submission.status == "SUBMITTED" else ""
                 realtime.notify(request, realtime.team_channel(registration_id), realtime.message(
@@ -474,6 +478,13 @@ def _team_track_payload(submission: Submission | None, track: Track | None) -> d
 def _ensure_order(stage: Stage) -> None:
     if stage.submission_opens_at and stage.submission_closes_at and stage.submission_opens_at >= stage.submission_closes_at:
         raise HTTPException(422, "submissions must open before they close")
+    # A team's clock never runs past the event: the time limit can't be longer than the event itself.
+    if stage.time_limit_minutes and stage.submission_opens_at and stage.submission_closes_at:
+        window = int((stage.submission_closes_at - stage.submission_opens_at).total_seconds() // 60)
+        if stage.time_limit_minutes > window:
+            raise HTTPException(422, f"the time limit is longer than the event ({window} minutes from open to close); shorten it or widen the event")
+    if stage.timer_start == "OPEN" and stage.submission_opens_at is None:
+        raise HTTPException(422, "set when submissions open; the clock starts for every team then")
 
 
 def _stage_payload(session, stage: Stage, now: datetime) -> dict:
@@ -483,8 +494,10 @@ def _stage_payload(session, stage: Stage, now: datetime) -> dict:
         "submission_window": stage_rules.window_payload(stage, now),
         "statements": {"release_at": stage.statements_release_at.isoformat() if stage.statements_release_at else None,
                        "released": stage_rules.statements_released(stage, now)},
+        "statement_mode": stage.statement_mode, "timer_start": stage.timer_start,
         "time_limit_minutes": stage.time_limit_minutes,
-        "started": int(session.scalar(select(func.count(Submission.id)).where(Submission.stage_id == stage.id, Submission.started_at.is_not(None))) or 0)
+        # With an OPEN timer every team's clock starts together, so there is no per-team start to count.
+        "started": 0 if stage_rules.clock_starts_at_open(stage) else int(session.scalar(select(func.count(Submission.id)).where(Submission.stage_id == stage.id, Submission.started_at.is_not(None))) or 0)
         if stage.time_limit_minutes else 0,
         "tracks": [stage_rules.track_payload(track) for track in stage_rules.tracks(session, stage.id)],
         "updated_at": stage.updated_at.isoformat() if stage.updated_at else None,
