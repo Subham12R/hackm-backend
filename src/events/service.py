@@ -56,5 +56,6 @@ def event_payload(event: Event, now: datetime, stage: Stage | None) -> dict:
         "challenge": {
             "release_at": _iso(stage.statements_release_at) if stage else None,
             "released": statements_released(stage, now) if stage else False,
+            "mode": stage.statement_mode if stage else "REVEAL",
         },
     }

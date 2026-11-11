@@ -36066,6 +36066,24 @@
               }
             ],
             "title": "Time Limit Minutes"
+          },
+          "statement_mode": {
+            "type": "string",
+            "enum": [
+              "REVEAL",
+              "SELECT"
+            ],
+            "title": "Statement Mode",
+            "default": "REVEAL"
+          },
+          "timer_start": {
+            "type": "string",
+            "enum": [
+              "REVEAL",
+              "OPEN"
+            ],
+            "title": "Timer Start",
+            "default": "REVEAL"
           }
         },
         "type": "object",
@@ -36188,6 +36206,36 @@
               }
             ],
             "title": "Time Limit Minutes"
+          },
+          "statement_mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "REVEAL",
+                  "SELECT"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statement Mode"
+          },
+          "timer_start": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "REVEAL",
+                  "OPEN"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timer Start"
           }
         },
         "type": "object",

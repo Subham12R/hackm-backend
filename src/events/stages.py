@@ -10,6 +10,8 @@ from src.db.models.registration import Registration
 from src.db.models.stage import Stage, Track
 
 ELIGIBILITY = ("ALL_PAID", "FINALISTS")
+STATEMENT_MODES = ("REVEAL", "SELECT")
+TIMER_STARTS = ("REVEAL", "OPEN")
 PLACEMENT_LABELS = {1: "Winner", 2: "1st runner-up", 3: "2nd runner-up"}
 
 
@@ -65,12 +67,31 @@ def submission_state(stage: Stage, now: datetime, extra_minutes: int = 0) -> str
     return "OPEN"
 
 
+def is_select(stage: Stage) -> bool:
+    """Select mode: every problem statement is out from the start and the team leader picks one; nothing is revealed."""
+    return stage.statement_mode == "SELECT"
+
+
 def statements_released(stage: Stage, now: datetime) -> bool:
+    if is_select(stage):
+        return True
     return stage.statements_release_at is not None and now >= stage.statements_release_at
 
 
 def is_timed(stage: Stage) -> bool:
     return bool(stage.time_limit_minutes)
+
+
+def clock_starts_at_open(stage: Stage) -> bool:
+    """The clock runs from when submissions open for every team, whatever the reveal time (no start button)."""
+    return stage.timer_start == "OPEN" and stage.submission_opens_at is not None
+
+
+def clock_started_at(stage: Stage, started_at: datetime | None, now: datetime) -> datetime | None:
+    """When a team's clock started: the event's open time for OPEN timers once it has passed, else the team's own start."""
+    if is_timed(stage) and clock_starts_at_open(stage):
+        return stage.submission_opens_at if now >= stage.submission_opens_at else None
+    return started_at
 
 
 def personal_deadline(stage: Stage, started_at: datetime | None, extra_minutes: int = 0) -> datetime | None:
@@ -100,6 +121,10 @@ def can_start(stage: Stage, now: datetime, extra_minutes: int = 0) -> str | None
     """Why a team cannot start its clock yet, or None when it can."""
     if not is_timed(stage):
         return "this event has no per-team timer"
+    if clock_starts_at_open(stage):
+        return "this event's clock starts on its own when submissions open"
+    if is_select(stage) and submission_state(stage, now, extra_minutes) == "NOT_OPEN":
+        return "this event has not started yet"
     if not statements_released(stage, now):
         return "the problem statements are not out yet"
     if submission_state(stage, now, extra_minutes) == "CLOSED":
@@ -108,14 +133,18 @@ def can_start(stage: Stage, now: datetime, extra_minutes: int = 0) -> str | None
 
 
 def timer_payload(stage: Stage, started_at: datetime | None, now: datetime, extra_minutes: int = 0) -> dict | None:
+    """`started_at` is the team's own start; for OPEN timers the event's open time is used instead."""
     if not is_timed(stage):
         return None
+    started_at = clock_started_at(stage, started_at, now)
     deadline = personal_deadline(stage, started_at, extra_minutes)
     # What a team would get if it started right now, so the start button can say so.
     preview = personal_deadline(stage, now, extra_minutes) if started_at is None and can_start(stage, now, extra_minutes) is None else None
     return {
         "limit_minutes": stage.time_limit_minutes, "extra_minutes": extra_minutes or 0, "started_at": _iso(started_at), "deadline": _iso(deadline),
         "deadline_if_started_now": _iso(preview), "state": timer_state(stage, started_at, now, extra_minutes),
+        # OPEN: the clock starts for everyone when submissions open; TEAM: each team starts its own.
+        "starts": "OPEN" if clock_starts_at_open(stage) else "TEAM",
     }
 
 

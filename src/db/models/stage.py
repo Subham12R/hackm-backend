@@ -38,6 +38,12 @@ class Stage(Base):
     submission_opens_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     submission_closes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     statements_release_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # REVEAL: problem statements stay hidden until statements_release_at. SELECT: every statement is visible as soon
+    # as the event is, and the team leader picks one (no reveal).
+    statement_mode: Mapped[str] = mapped_column(String(10), default="REVEAL", server_default="REVEAL")
+    # REVEAL: the clock follows the reveal (a timed team starts its own clock once statements are out).
+    # OPEN: the clock starts for every team when submissions open, whatever the reveal time.
+    timer_start: Mapped[str] = mapped_column(String(10), default="REVEAL", server_default="REVEAL")
     # Optional per-team time limit: each team gets this long from when it starts, capped at submission close.
     time_limit_minutes: Mapped[int | None] = mapped_column(Integer)
     # The admin-built submission form (src/submissions/form.py); NULL means the built-in default form.
