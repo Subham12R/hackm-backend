@@ -1,7 +1,9 @@
 import os
 from logging.config import fileConfig
+from pathlib import Path
 
 from alembic import context
+from dotenv import load_dotenv
 from sqlalchemy import engine_from_config, pool
 
 from src.db.base import Base
@@ -9,6 +11,8 @@ import src.db.models  # noqa: F401
 
 config = context.config
 if not config.get_main_option("sqlalchemy.url"):
+    # A local checkout keeps DATABASE_URL in .env; containers pass it in the environment.
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     database_url = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL")
     if database_url:
         config.set_main_option(

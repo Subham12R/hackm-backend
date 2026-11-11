@@ -1,73 +1,121 @@
 # HackMatrix backend
 
-FastAPI and PostgreSQL API for HackMatrix 2026. It owns identity, registration pricing, Razorpay payment confirmation, leader activation, participant submissions, and the admin read models. The participant app (`hackm/frontend`) and admin app (`admin-hackm`) are separate clients.
+FastAPI and PostgreSQL API behind HackMatrix 2026. It owns identity, registration pricing, Razorpay payment
+confirmation, leader activation, events and submissions, judging, certificates, and every admin read model.
+
+Two apps use it today, and yours can too:
+
+- **`hackm`**, the participant site (Next.js, `frontend/`)
+- **`admin-hackm`**, the ORG. admin panel for organisers and judges (Next.js)
 
 PostgreSQL is the source of truth. A browser checkout callback is not proof of payment.
+
+## API documentation
+
+| | |
+|---|---|
+| **[Developer guide](docs/api/README.md)** | Auth and roles, error format, conventions, the main flows with code, rate limits, troubleshooting |
+| **[OpenAPI spec](docs/api/openapi.json)** | Every operation with request and response schemas and examples. Import it into Postman or Insomnia, or generate a typed client with `openapi-typescript` |
+| **[Endpoint index](docs/api/endpoints.md)** | One table per area: method, path, roles, body, success status |
+| **Live reference** | `/docs` (Swagger UI) and `/redoc` on any running API, e.g. <https://api.hackmatrix.codes/docs> |
+
+The spec is generated from the code and checked by a test, so it can't drift silently. After changing a route, run
+`uv run python scripts/export_openapi.py` and commit the result (details in the guide's
+[last section](docs/api/README.md#keeping-the-docs-current)).
+
+Integrating a frontend in one paragraph: call the API from your server, not the browser (there is no CORS, and
+tokens stay in httpOnly cookies). Sign in with `POST /api/v1/auth/login {email, password, portal}`, send
+`Authorization: Bearer <access_token>`, and on a `401` refresh once with `POST /api/v1/auth/refresh`, sharing one
+refresh between parallel requests because refresh tokens are single use. Errors are `{"detail": "..."}`. The guide has
+a copy-paste Next.js proxy.
 
 ## Stack
 
 - Python 3.13, `uv`, FastAPI, Uvicorn
-- SQLAlchemy 2 and Alembic
-- Neon PostgreSQL locally; the same migrations run on Docker PostgreSQL
+- SQLAlchemy 2 and Alembic on PostgreSQL 16 (Neon or Docker)
 - Argon2id passwords
 - Ed25519 access JWTs, 15 minutes, plus hashed rotating refresh sessions
 - Razorpay orders, signature checks, and deduplicated webhooks
-- Resend in production, local email sink when Resend is not configured
+- Resend for email in production, a local sink when it isn't configured
+- Optional: Redis (cache and live notifications across workers), S3 or Cloudflare R2 (gallery, certificates, uploads)
 
 ## Layout
 
 ```text
-src/api/            HTTP routes
-src/auth/           passwords, JWTs, sessions, roles, rate limits
+src/main.py         app factory: routers, error handler, background workers
+src/openapi.py      the OpenAPI document (schemas, roles, recorded examples)
+src/api/            HTTP routes, one module per area (auth, participant, judge, admin_*)
+src/auth/           passwords, JWTs, sessions, roles and policies, rate limits
 src/db/             SQLAlchemy models and session
+src/events/         stages (events), windows, problem statements, finals
+src/judging/        rubric scoring
+src/credentials/    certificates and badges
 src/payments/       Razorpay adapter
-src/communications/ email templates and providers
-src/registrations/  server-side pricing
+src/communications/ email templates, providers, outbox
+src/registrations/  server-side pricing, roster rules, unpaid sweep
+src/storage/        S3 / R2 presigned uploads
 migrations/         Alembic revisions
-scripts/            operator commands
+scripts/            operator commands (create_admin, export_openapi)
 tests/              unit and integration tests
-docs/               product decisions and plans
+docs/               API docs, product decisions and plans
 ```
 
-`docs/folder-structure.md` is a target layout. The running code is flatter than that document.
+## Local setup
 
-## Setup
+You need Python 3.13 with [`uv`](https://docs.astral.sh/uv/) and a PostgreSQL 16 database.
 
 ```sh
 uv sync
 cp .env.example .env
-```
 
-Required environment values live in `.env` and are never committed:
+# A throwaway Postgres, if you don't have one
+docker run -d --name hackm-dev-db -p 5433:5432 \
+  -e POSTGRES_USER=hackm -e POSTGRES_PASSWORD=hackm -e POSTGRES_DB=hackm postgres:16-alpine
+echo 'DATABASE_URL=postgresql+psycopg://hackm:hackm@127.0.0.1:5433/hackm' >> .env
 
-- `NEON_DATABASE_URL` or `DATABASE_URL`
-- `JWT_PRIVATE_KEY_PEM` and `JWT_PUBLIC_KEY_PEM`
-- `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET`
-- `RESEND_API_KEY` for live email (senders below)
-- `RAZORPAY_FEE_PERCENT` (default `2`) and `RAZORPAY_FEE_GST_PERCENT` (default `18`): Razorpay's cut, added on top of the tier price so each tier nets ₹400 / ₹300 / ₹200 (charged ₹410 / ₹308 / ₹205). Set the percent to `0` to stop passing it on.
-- `OWNER_EMAIL` (optional, default `admin@hackmatrix.codes`): the protected owner account (the login)
-- `OWNER_INBOX` (optional, default `rikk4335@gmail.com`): where mail for the owner account is delivered (flush codes, security alerts, password resets); all other mail is unaffected
-- `PARTICIPANT_APP_URL` for activation and reset links
+# Signing keys: without them the auth, participant, judge and admin routes are not mounted
+uv run python - >> .env <<'PY'
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization as s
+k = Ed25519PrivateKey.generate()
+pem = lambda b: b.decode().strip().replace("\n", "\\n")
+print("JWT_PRIVATE_KEY_PEM=" + pem(k.private_bytes(s.Encoding.PEM, s.PrivateFormat.PKCS8, s.NoEncryption())))
+print("JWT_PUBLIC_KEY_PEM=" + pem(k.public_key().public_bytes(s.Encoding.PEM, s.PublicFormat.SubjectPublicKeyInfo)))
+PY
 
-Apply migrations:
-
-```sh
 uv run alembic upgrade head
+uv run python scripts/create_admin.py --email you@example.com   # prompts for the password
+uv run uvicorn src.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Create the first super admin. The password is read from the prompt, not the command line.
+Open <http://127.0.0.1:8000/docs>, call `POST /api/v1/auth/login` with `portal: "admin"`, and paste the
+`access_token` into **Authorize**. `GET /healthz` answers `{"status":"ok"}` once the database is reachable.
 
-```sh
-uv run python scripts/create_admin.py --email you@hackmatrix.codes
-```
+Then point a client at it: `BACKEND_URL=http://127.0.0.1:8000` in `admin-hackm` or `hackm/frontend`.
 
-## Run
+## Environment
 
-```sh
-uv run uvicorn src.main:app --host 127.0.0.1 --port 8000
-```
+Values live in `.env` (never committed). Only the database and the signing keys are needed to boot; everything else
+switches a feature on.
 
-Health check: `GET /healthz`.
+| Variable | Needed for | Notes |
+|---|---|---|
+| `DATABASE_URL` or `NEON_DATABASE_URL` | Everything | `postgresql+psycopg://user:pass@host:port/db` |
+| `JWT_PRIVATE_KEY_PEM`, `JWT_PUBLIC_KEY_PEM` | Every signed-in route | Ed25519 PEM with literal `\n` for newlines. Rotating them signs everyone out |
+| `PARTICIPANT_APP_URL`, `ADMIN_APP_URL` | Links in emails | Activation, reset, invite and verify links |
+| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Paid registration | Test keys locally. Without them registration answers `503` on paid events |
+| `RAZORPAY_WEBHOOK_SECRET` | Payment webhooks | Enable `payment.captured`, `payment.failed`, `order.paid`, `refund.processed`, `refund.failed` |
+| `RAZORPAY_FEE_PERCENT`, `RAZORPAY_FEE_GST_PERCENT` | Fee pass-through | Default `2` and `18`: Razorpay's cut is added on top of the tier price. `0` turns it off |
+| `RESEND_API_KEY` | Sending email | Without it, mail goes to a local sink (logged) |
+| `EMAIL_FROM_NOREPLY`, `EMAIL_FROM_SUPPORT`, `EMAIL_FROM_ANNOUNCEMENTS`, `EMAIL_DOMAIN`, `EMAIL_BANNER_URL` | Email branding | See [Email senders](#email-senders) |
+| `OWNER_EMAIL`, `OWNER_INBOX` | Owner account | The protected owner login, and where its mail is delivered |
+| `REDIS_URL` | Cache, live notifications across workers | Optional with a single worker |
+| `R2_*` or `S3_*` plus `AWS_*` | Gallery, certificates, email attachments | See [Photo gallery storage](#photo-gallery-storage). Without a bucket, uploads answer `503` |
+| `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_CACHE_SECONDS` | Home page Instagram feed | See [Instagram feed](#instagram-feed) |
+| `CREDENTIAL_ISSUER` | Certificates | Issuer line, default "ACM Student Chapter, Adamas University" |
+| `DB_POOL_SIZE`, `DB_MAX_OVERFLOW` | Tuning | Per API process |
+| `EMAIL_OUTBOX_WORKER`, `UNPAID_REGISTRATION_WORKER`, `CREDENTIAL_RENDER_WORKER` | Background loops | `1` by default; set `0` on all but one process when running several |
+| `NOTIFY_HEARTBEAT_SECONDS` | Live notifications | Default 20 |
 
 ## Product flow
 
@@ -83,47 +131,19 @@ Forgot-password sends a reset link for an active account and a fresh activation 
 
 ## API
 
-Auth, prefix `/api/v1/auth`:
+The full reference moved to [`docs/api/`](docs/api/README.md). Areas, by prefix:
 
-- `POST /login`, `/refresh`, `/logout`
-- `GET /me`
-- `GET /activation`, `POST /activate`
-- `POST /password/forgot`, `POST /password/reset`
-- `POST /admin/invites`, `POST /admin/invites/accept`
+- `/api/v1/public/*`: event, leaderboard, gallery, site notices, Instagram, credential verification, contact form
+- `/api/v1/registrations*` and `/api/v1/payments/razorpay/*`: team registration, invites, RSVP, payment
+- `/api/v1/auth/*`: login, refresh, logout, me, activation, password reset and change, staff invites
+- `/api/v1/participant/*`: the team leader's dashboard, roster, events, submissions, results, live stream
+- `/api/v1/judge/*`: a judge's assignments and scorecards
+- `/api/v1/admin/*`: everything organisers do in the ORG. admin panel
 
-Registration and payments:
-
-- `POST /api/v1/registrations`
-- `POST /api/v1/payments/razorpay/confirm`
-- `POST /api/v1/payments/razorpay/webhook`
-
-Participant, prefix `/api/v1/participant`, leader access token required:
-
-- `GET /dashboard`
-- `GET /stages` lists the events the team takes part in, their problem statements once revealed, and the team's submission for each
-- `PUT /stages/{stage_id}/submission` and `POST /stages/{stage_id}/submission/finalize` (send `track_id` to pick a problem statement)
-- `PUT /submission`, `POST /submission/finalize` and `GET /challenge` act on the team's current event, for older clients
-
-Admin, prefix `/api/v1/admin`, admin role required:
-
-- `GET /registrations`
-- `GET /teams`
-- `GET /stages`, `POST /stages`, `PATCH /stages/{id}`, `DELETE /stages/{id}` manage events (online round, finals, ...): schedule, who takes part (`ALL_PAID` or `FINALISTS`), published
-- `POST /stages/{id}/tracks`, `PUT /tracks/{id}`, `DELETE /tracks/{id}` manage an event's problem statements
-- `GET /submissions?stage_id=&track_id=` lists one event's submissions (the first event when left out)
-- `POST /submissions/{registration_id}/assign?stage_id=`
-- `POST /submissions/{submission_id}/awards` (`placement`, optional `label` and `track_id`) and `DELETE /awards/{id}` mark winners per event and per track
-- `GET /evaluations`
-- `POST /evaluations`
-- `GET /logs`
-- `POST /teams/{registration_id}/finals` accepts or declines a paid team for the finals
-- `GET /checkins` lists finals teams with members, arrival counts, and a 15-minute arrival timeline
-- `POST /checkins/members/{member_id}` and `POST /checkins/teams/{registration_id}` mark or undo arrivals
-- `GET /gallery`, `POST /gallery/uploads` (presigned S3 POST), `POST /gallery`, `PATCH /gallery/{id}`, `DELETE /gallery/{id}`
-
-Teams register and pay once; each event ("stage" in the code) has its own submission window, problem statements, submissions, judging rounds and winners. Migration `0012_stages` moves the existing schedule, challenge, submissions and rounds into a published "Main round". The event-level submission times and `/admin/challenge` now act on the first event.
-
-Public, prefix `/api/v1/public`: `GET /event`, `GET /leaderboard`, `GET /gallery`, `POST /contact`.
+Teams register and pay once; each event ("stage" in the code) has its own submission window, problem statements
+("tracks"), submissions, judging rounds and winners. Migration `0012_stages` moved the original single schedule,
+challenge, submissions and rounds into a published "Main round", and the older event-level routes
+(`/participant/submission`, `/admin/challenge`) act on the first event.
 
 ## Live notifications
 
@@ -201,12 +221,23 @@ HackMatrix Postgres runs as its own container, `hackm-postgres`, with no host po
 ## Tests
 
 ```sh
+docker run -d --name hackm-test-db -p 55432:5432 \
+  -e POSTGRES_USER=hackm_test -e POSTGRES_PASSWORD=hackm_test -e POSTGRES_DB=hackm_test postgres:16-alpine
 uv run pytest
 ```
 
-Integration tests expect PostgreSQL at `TEST_DATABASE_URL`, defaulting to `postgresql+psycopg://hackm_test:hackm_test@127.0.0.1:55432/hackm_test`.
+Integration tests expect PostgreSQL at `TEST_DATABASE_URL`, defaulting to
+`postgresql+psycopg://hackm_test:hackm_test@127.0.0.1:55432/hackm_test`. They run migrations themselves.
+
+`tests/unit/test_openapi_docs.py` checks that `docs/api/` matches the code. To refresh the recorded response examples
+as well, run `uv run python scripts/export_openapi.py --record` (it reruns the suite).
+
+The production image installs with `uv sync --no-dev`, so anything imported at runtime must be a main dependency, not
+a dev one. Tests won't catch that; `uv sync --frozen --no-dev` in a clean environment plus `python -c "import
+src.main"` will.
 
 ## Further reading
 
+- [`docs/api/README.md`](docs/api/README.md) for building on the API, including troubleshooting
 - `CONTEXT.md` for domain terms and invariants
 - `docs/PRD.md` for the product contract

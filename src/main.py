@@ -44,6 +44,7 @@ from src.registrations.unpaid import sweep_unpaid
 from src.api.middleware import request_id_middleware
 from src.config import Settings, decode_pem_env
 from src.instagram.feed import InstagramFeed
+from src import openapi
 from src.db.session import create_db_engine
 from src.realtime import notifier_from_env
 from src.storage.s3 import Storage, storage_from_env
@@ -155,6 +156,7 @@ def create_app(
         app.include_router(admin_credentials_router(public_key))
         app.include_router(judge_router(public_key))
 
+    openapi.install(app)
     return app
 
 
