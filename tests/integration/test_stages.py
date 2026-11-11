@@ -91,9 +91,14 @@ def test_finalists_move_on_to_the_next_event_after_the_online_round(stages_clean
     # The finals stay hidden until the decision is emailed, so an Accept click never leaks early.
     early = harness.client.get("/api/v1/participant/stages", headers=finalist).json()
     assert [stage["id"] for stage in early["stages"]] == [first_id]
+    # Admin sees how many accepted teams are still waiting for their email (and so can't see the finals yet).
+    listed_admin = {item["id"]: item for item in harness.client.get("/api/v1/admin/stages", headers=admin).json()["items"]}
+    assert listed_admin[finals["id"]]["teams_not_notified"] >= 1 and listed_admin[first_id]["teams_not_notified"] == 0
     with db() as session:
         session.execute(update(Registration).where(Registration.team_name == finalist_payload["team_name"]).values(finals_notified_status="ACCEPTED"))
         session.commit()
+    waiting = next(item for item in harness.client.get("/api/v1/admin/stages", headers=admin).json()["items"] if item["id"] == finals["id"])
+    assert waiting["teams_not_notified"] == listed_admin[finals["id"]]["teams_not_notified"] - 1
 
     # A finalist sees both events and lands on the finals; everyone else only sees the online round.
     listed = harness.client.get("/api/v1/participant/stages", headers=finalist).json()
