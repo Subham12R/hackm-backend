@@ -8,7 +8,7 @@ Auth: `public` needs nothing; otherwise send `Authorization: Bearer <access_toke
 the listed roles. `staff (not JUDGE)` is SUPER_ADMIN, EVENT_ADMIN, REGISTRATION_ADMIN, EVALUATION_ADMIN,
 SUPPORT_ADMIN and VIEWER. `PARTICIPANT` means the team leader's account.
 
-197 operations.
+198 operations.
 
 | Group | Operations |
 |---|---|
@@ -22,7 +22,7 @@ SUPPORT_ADMIN and VIEWER. `PARTICIPANT` means the team leader's account.
 | [admin](#admin) | 13 |
 | [admin-payments](#admin-payments) | 14 |
 | [admin-event](#admin-event) | 10 |
-| [admin-stages](#admin-stages) | 14 |
+| [admin-stages](#admin-stages) | 15 |
 | [admin-judging](#admin-judging) | 20 |
 | [admin-checkin](#admin-checkin) | 7 |
 | [admin-credentials](#admin-credentials) | 23 |
@@ -201,6 +201,7 @@ Events inside the edition ("stages"), problem statements ("tracks"), submission 
 | `GET` | `/api/v1/admin/stages/{stage_id}/submission-form` | staff (not JUDGE) |  | 200 |
 | `PUT` | `/api/v1/admin/stages/{stage_id}/submission-form` | SUPER_ADMIN, EVENT_ADMIN | SubmissionFormRequest | 200 |
 | `DELETE` | `/api/v1/admin/stages/{stage_id}/submission-form` | SUPER_ADMIN, EVENT_ADMIN |  | 200 |
+| `PUT` | `/api/v1/admin/stages/{stage_id}/submission-form/external` | SUPER_ADMIN, EVENT_ADMIN | ExternalFormRequest | 200 |
 | `GET` | `/api/v1/admin/stages` | staff (not JUDGE) |  | 200 |
 | `POST` | `/api/v1/admin/stages` | SUPER_ADMIN, EVENT_ADMIN | StageRequest | 201 |
 | `PATCH` | `/api/v1/admin/stages/{stage_id}` | SUPER_ADMIN, EVENT_ADMIN | StageUpdate | 200 |

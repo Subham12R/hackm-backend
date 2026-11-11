@@ -27092,6 +27092,94 @@
         ]
       }
     },
+    "/api/v1/admin/stages/{stage_id}/submission-form/external": {
+      "put": {
+        "tags": [
+          "admin-stages"
+        ],
+        "summary": "Put External Form",
+        "description": "**Roles:** `SUPER_ADMIN`, `EVENT_ADMIN`\n\nPoint teams at an outside form (Google Forms, Tally, ...), instead of or next to the built-in form.",
+        "operationId": "put_external_form_api_v1_admin_stages__stage_id__submission_form_external_put",
+        "parameters": [
+          {
+            "name": "stage_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Stage Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExternalFormRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed: FastAPI's `detail` list for bad fields, or a `detail` string for a business rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid access token (`invalid access token`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the role is not allowed (`admin access required`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-roles": [
+          "SUPER_ADMIN",
+          "EVENT_ADMIN"
+        ]
+      }
+    },
     "/api/v1/admin/stages": {
       "get": {
         "tags": [
@@ -34593,6 +34681,20 @@
           "dataset"
         ],
         "title": "ExportRequest"
+      },
+      "ExternalFormRequest": {
+        "properties": {
+          "external": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "External"
+          }
+        },
+        "type": "object",
+        "required": [
+          "external"
+        ],
+        "title": "ExternalFormRequest"
       },
       "ExtraRecipient": {
         "properties": {
