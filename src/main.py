@@ -41,7 +41,7 @@ from src.cache import cache_from_env
 from src.communications.outbox import dispatch_pending
 from src.credentials.service import render_pending
 from src.registrations.unpaid import sweep_unpaid
-from src.api.middleware import request_id_middleware
+from src.api.middleware import request_id_middleware, security_headers_middleware
 from src.config import Settings, decode_pem_env
 from src.instagram.feed import InstagramFeed
 from src.db.session import create_db_engine
@@ -103,6 +103,7 @@ def create_app(
     app.include_router(registration_router)
     app.include_router(public_router)
     app.middleware("http")(request_id_middleware)
+    app.middleware("http")(security_headers_middleware)
 
     @app.exception_handler(ApiError)
     async def handle_api_error(request: Request, error: ApiError) -> JSONResponse:
