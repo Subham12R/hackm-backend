@@ -17,7 +17,10 @@ def test_embed_url_adds_google_embedded_flag() -> None:
     assert submission_form.embed_url("https://docs.google.com/forms/d/e/abc/viewform?usp=sf_link") == \
         "https://docs.google.com/forms/d/e/abc/viewform?usp=sf_link&embedded=true"
     assert submission_form.embed_url("https://docs.google.com/forms/d/abc/edit") == "https://docs.google.com/forms/d/abc/viewform?embedded=true"
-    assert submission_form.embed_url("https://tally.so/r/xyz") == "https://tally.so/r/xyz"
+    assert submission_form.embed_url("https://tally.so/r/xyz") == "https://tally.so/embed/xyz"
+    assert submission_form.embed_url("https://airtable.com/appA/shrB") == "https://airtable.com/embed/appA/shrB"
+    assert submission_form.embed_url("https://forms.office.com/r/abc") == "https://forms.office.com/r/abc?embed=true"
+    assert submission_form.embed_url("https://form.typeform.com/to/abc") == "https://form.typeform.com/to/abc"
 
 
 def test_external_form_replaces_or_sits_alongside_the_built_in_form() -> None:

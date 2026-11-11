@@ -86,13 +86,23 @@ def external_replaces(stage) -> bool:
 
 
 def embed_url(url: str) -> str:
-    """Google Forms only renders inside a frame with `embedded=true`; other providers take the share link as is."""
+    """The address to put in an iframe: some providers only render inside a frame from their embed link."""
     parsed = urlparse(url)
-    if parsed.hostname == "docs.google.com" and parsed.path.startswith("/forms/"):
-        path = re.sub(r"/(edit|prefill)$", "/viewform", parsed.path)
-        query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "embedded"]
-        return urlunparse(parsed._replace(path=path, query=urlencode([*query, ("embedded", "true")])))
+    host, path = parsed.hostname or "", parsed.path
+    if host == "docs.google.com" and path.startswith("/forms/"):
+        return _with_query(parsed._replace(path=re.sub(r"/(edit|prefill)$", "/viewform", path)), "embedded", "true")
+    if host in ("forms.office.com", "forms.cloud.microsoft"):
+        return _with_query(parsed, "embed", "true")
+    if host == "tally.so" and path.startswith("/r/"):
+        return urlunparse(parsed._replace(path="/embed/" + path[len("/r/"):]))
+    if host == "airtable.com" and not path.startswith("/embed/"):
+        return urlunparse(parsed._replace(path="/embed" + path))
     return url
+
+
+def _with_query(parsed, key: str, value: str) -> str:
+    query = [(name, item) for name, item in parse_qsl(parsed.query, keep_blank_values=True) if name != key]
+    return urlunparse(parsed._replace(query=urlencode([*query, (key, value)])))
 
 
 def validate_external(raw) -> dict:
