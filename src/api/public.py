@@ -67,6 +67,17 @@ def public_event(request: Request):
         return event_payload(event, now, stage_rules.current_stage(stage_rules.stages(session, event.id, published_only=True), now))
 
 
+@router.get("/domains")
+def public_domains(request: Request):
+    """The home page's Domains: the chosen event's problem statement titles, sent only once they are released.
+    Before that only the count and the release time go out, so nothing can be read from the page early."""
+    with _session(request) as session:
+        event = current_event(session)
+        now = datetime.now(UTC)
+        stage = session.scalar(select(Stage).where(Stage.event_id == event.id, Stage.show_on_home, Stage.published).limit(1))
+        return stage_rules.home_domains_payload(stage, stage_rules.tracks(session, stage.id) if stage else [], now)
+
+
 @router.get("/leaderboard")
 def public_leaderboard(request: Request):
     with _session(request) as session:

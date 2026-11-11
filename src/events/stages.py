@@ -68,14 +68,29 @@ def submission_state(stage: Stage, now: datetime, extra_minutes: int = 0) -> str
 
 
 def is_select(stage: Stage) -> bool:
-    """Select mode: every problem statement is out from the start and the team leader picks one; nothing is revealed."""
+    """Select mode: all problem statements come out together (no per-team clock gating them) and the leader picks one."""
     return stage.statement_mode == "SELECT"
 
 
 def statements_released(stage: Stage, now: datetime) -> bool:
-    if is_select(stage):
-        return True
-    return stage.statements_release_at is not None and now >= stage.statements_release_at
+    """Out once the release time passes. In select mode an empty release time means out from the start."""
+    if stage.statements_release_at is None:
+        return is_select(stage)
+    return now >= stage.statements_release_at
+
+
+def home_domains_payload(stage: Stage | None, tracks: list[Track], now: datetime) -> dict:
+    """The public home page's Domains: titles only, and none of them before the release time."""
+    if stage is None:
+        return {"now": now.isoformat(), "event": None, "release_at": None, "released": False, "overall_track": "", "has_overall_track": False,
+                "count": 0, "tracks": []}
+    released = statements_released(stage, now)
+    return {
+        "now": now.isoformat(), "event": stage.name, "release_at": _iso(stage.statements_release_at), "released": released,
+        # The overall track is held back with the titles; before the release only its existence is known.
+        "overall_track": (stage.overall_track or "") if released else "", "has_overall_track": bool(stage.overall_track), "count": len(tracks),
+        "tracks": [{"position": index + 1, "title": track.title} for index, track in enumerate(tracks)] if released else [],
+    }
 
 
 def is_timed(stage: Stage) -> bool:

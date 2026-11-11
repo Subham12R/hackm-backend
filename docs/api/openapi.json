@@ -1163,6 +1163,27 @@
         "security": []
       }
     },
+    "/api/v1/public/domains": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Public Domains",
+        "description": "The home page's Domains: the chosen event's problem statement titles, sent only once they are released.\nBefore that only the count and the release time go out, so nothing can be read from the page early.",
+        "operationId": "public_domains_api_v1_public_domains_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/api/v1/public/leaderboard": {
       "get": {
         "tags": [
@@ -36084,6 +36105,17 @@
             ],
             "title": "Timer Start",
             "default": "REVEAL"
+          },
+          "show_on_home": {
+            "type": "boolean",
+            "title": "Show On Home",
+            "default": false
+          },
+          "overall_track": {
+            "type": "string",
+            "maxLength": 200,
+            "title": "Overall Track",
+            "default": ""
           }
         },
         "type": "object",
@@ -36236,6 +36268,29 @@
               }
             ],
             "title": "Timer Start"
+          },
+          "show_on_home": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Show On Home"
+          },
+          "overall_track": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overall Track"
           }
         },
         "type": "object",

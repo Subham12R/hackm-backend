@@ -669,11 +669,11 @@ def _started_at(stage: Stage, submission: Submission | None, now: datetime) -> d
 
 def _statements_visible(stage: Stage, submission: Submission | None, now: datetime) -> bool:
     """Released statements, and in a timed event only once this team's clock is running.
-    In select mode every statement is visible from the start so the leader can pick one."""
-    if stage_rules.is_select(stage):
-        return True
+    In select mode released statements show straight away so the leader can pick one before its clock runs."""
     if not stage_rules.statements_released(stage, now):
         return False
+    if stage_rules.is_select(stage):
+        return True
     return not stage_rules.is_timed(stage) or _started_at(stage, submission, now) is not None
 
 

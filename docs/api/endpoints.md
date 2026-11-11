@@ -8,12 +8,12 @@ Auth: `public` needs nothing; otherwise send `Authorization: Bearer <access_toke
 the listed roles. `staff (not JUDGE)` is SUPER_ADMIN, EVENT_ADMIN, REGISTRATION_ADMIN, EVALUATION_ADMIN,
 SUPPORT_ADMIN and VIEWER. `PARTICIPANT` means the team leader's account.
 
-198 operations.
+199 operations.
 
 | Group | Operations |
 |---|---|
 | [health](#health) | 1 |
-| [public](#public) | 7 |
+| [public](#public) | 8 |
 | [registrations](#registrations) | 5 |
 | [payments](#payments) | 2 |
 | [auth](#auth) | 11 |
@@ -51,6 +51,7 @@ No sign-in. Event schedule, leaderboard, gallery, site notices, Instagram feed, 
 | `GET` | `/api/v1/public/site-notices` | public |  | 200 |
 | `GET` | `/api/v1/public/instagram` | public |  | 200 |
 | `GET` | `/api/v1/public/event` | public |  | 200 |
+| `GET` | `/api/v1/public/domains` | public |  | 200 |
 | `GET` | `/api/v1/public/leaderboard` | public |  | 200 |
 | `GET` | `/api/v1/public/gallery` | public |  | 200 |
 | `GET` | `/api/v1/public/credentials/{code}` | public |  | 200 |

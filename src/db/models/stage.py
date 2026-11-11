@@ -44,6 +44,10 @@ class Stage(Base):
     # REVEAL: the clock follows the reveal (a timed team starts its own clock once statements are out).
     # OPEN: the clock starts for every team when submissions open, whatever the reveal time.
     timer_start: Mapped[str] = mapped_column(String(10), default="REVEAL", server_default="REVEAL")
+    # The event whose problem statement titles fill the public home page's Domains section (at most one).
+    show_on_home: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # An extra track open to every team on top of its pick (e.g. a partner prize track), shown first on the home page.
+    overall_track: Mapped[str] = mapped_column(String(200), default="", server_default="")
     # Optional per-team time limit: each team gets this long from when it starts, capped at submission close.
     time_limit_minutes: Mapped[int | None] = mapped_column(Integer)
     # The admin-built submission form (src/submissions/form.py); NULL means the built-in default form.
