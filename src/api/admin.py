@@ -4,7 +4,7 @@ from uuid import UUID
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, case, exists, func, literal, select
 from sqlalchemy.orm import Session
 
@@ -53,6 +53,10 @@ class AssignRequest(BaseModel):
 
 class TeamReviewRequest(BaseModel):
     status: Literal["PENDING", "VERIFIED", "DECLINED"]
+
+
+class BulkTeamReviewRequest(TeamReviewRequest):
+    registration_ids: list[UUID] = Field(min_length=1, max_length=2000)
 
 
 def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
@@ -183,6 +187,26 @@ def admin_router(public_key: Ed25519PublicKey) -> APIRouter:
                 session.commit()
                 request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             return {"review": _review_row(session, registration)}
+
+    @router.post("/teams/bulk-review")
+    def bulk_review_teams(payload: BulkTeamReviewRequest, request: Request, authorization: str = Header()):
+        """Mark many teams' details verified, declined or pending in one go."""
+        session, actor = admin_user(request, authorization, TEAM_REVIEW_ROLES)
+        with session:
+            teams = list(session.scalars(select(Registration).where(
+                Registration.event_id == ACTIVE_EVENT_ID, Registration.id.in_(set(payload.registration_ids))).with_for_update()))
+            now, changed = datetime.now(UTC), 0
+            for registration in teams:
+                if registration.details_review_status != payload.status:
+                    registration.details_review_status = payload.status
+                    registration.details_reviewed_at = now
+                    registration.details_reviewed_by_user_id = actor.id
+                    audit(session, actor, "Team details reviewed", "registration", registration.id, status=payload.status, bulk=True)
+                    changed += 1
+            session.commit()
+            if changed:
+                request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            return {"changed": changed, "unchanged": len(teams) - changed}
 
     @router.get("/evaluators")
     def list_evaluators(request: Request, authorization: str = Header()):

@@ -208,3 +208,50 @@ def test_r2_settings_build_an_r2_store(monkeypatch):
     monkeypatch.delenv("R2_ACCESS_KEY_ID")
     monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
     assert storage_from_env() is None
+
+
+def test_bulk_gallery_finals_and_review() -> None:
+    harness, storage = _harness_with_storage()
+    admin = harness.login(staff(RoleCode.EVENT_ADMIN), "admin")
+    reviewer = harness.login(staff(RoleCode.REGISTRATION_ADMIN), "admin")
+    viewer = harness.login(staff(RoleCode.VIEWER), "admin")
+
+    ids, keys = [], []
+    for _ in range(3):
+        key = harness.client.post("/api/v1/admin/gallery/uploads", headers=admin, json={"content_type": "image/jpeg", "size_bytes": 1000}).json()["object_key"]
+        storage.objects[key] = StoredObject(size_bytes=1000, content_type="image/jpeg")
+        ids.append(harness.client.post("/api/v1/admin/gallery", headers=admin, json={"object_key": key}).json()["id"])
+        keys.append(key)
+    assert harness.client.post("/api/v1/admin/gallery/bulk", headers=viewer, json={"ids": ids, "action": "hide"}).status_code == 403
+    assert harness.client.post("/api/v1/admin/gallery/bulk", headers=admin, json={"ids": ids, "action": "hide"}).json() == {"changed": 3}
+    assert harness.client.post("/api/v1/admin/gallery/bulk", headers=admin, json={"ids": ids[:1], "action": "show"}).json() == {"changed": 1}
+    public = {item["id"] for item in harness.client.get("/api/v1/public/gallery").json()["items"]}
+    assert ids[0] in public and ids[1] not in public and ids[2] not in public
+    assert harness.client.post("/api/v1/admin/gallery/bulk", headers=admin, json={"ids": ids[1:], "action": "delete"}).json() == {"changed": 2}
+    assert sorted(storage.deleted) == sorted(keys[1:])
+
+    names = [f"Bulk {uuid4().hex[:8]}" for _ in range(2)]
+    for name in names:
+        harness.paid_team(team_name=name)
+    unpaid_payload, unpaid = harness.register()
+    assert unpaid.status_code == 202
+
+    def team_id(name: str) -> str:
+        items = harness.client.get("/api/v1/admin/teams", headers=reviewer, params={"search": name, "status": "ALL"}).json()["items"]
+        return next(item for item in items if item["team_name"] == name)["registration_id"]
+
+    team_ids = [team_id(name) for name in names] + [team_id(unpaid_payload["team_name"])]
+    assert harness.client.post("/api/v1/admin/teams/bulk-finals", headers=viewer, json={"registration_ids": team_ids, "status": "ACCEPTED"}).status_code == 403
+    decided = harness.client.post("/api/v1/admin/teams/bulk-finals", headers=reviewer, json={"registration_ids": team_ids, "status": "ACCEPTED"})
+    assert decided.status_code == 200, decided.text
+    body = decided.json()
+    assert body["changed"] == 2 and body["unchanged"] == 0
+    assert [item["team_name"] for item in body["skipped"]] == [unpaid_payload["team_name"]] and "paid" in body["skipped"][0]["reason"]
+    again = harness.client.post("/api/v1/admin/teams/bulk-finals", headers=reviewer, json={"registration_ids": team_ids[:2], "status": "ACCEPTED"}).json()
+    assert again == {"changed": 0, "unchanged": 2, "skipped": []}
+    finals = harness.client.get("/api/v1/admin/teams", headers=reviewer, params={"finals": "ACCEPTED", "page_size": 100}).json()["items"]
+    assert set(names) <= {item["team_name"] for item in finals}
+
+    reviewed = harness.client.post("/api/v1/admin/teams/bulk-review", headers=reviewer, json={"registration_ids": team_ids, "status": "VERIFIED"})
+    assert reviewed.status_code == 200 and reviewed.json() == {"changed": 3, "unchanged": 0}, reviewed.text
+    assert harness.client.post("/api/v1/admin/teams/bulk-review", headers=viewer, json={"registration_ids": team_ids, "status": "VERIFIED"}).status_code == 403

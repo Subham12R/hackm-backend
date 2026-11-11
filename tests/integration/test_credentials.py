@@ -258,3 +258,45 @@ def test_badges_skip_the_completion_gate_and_winner_certificates_use_awards(crea
 def background_like(key: str) -> str:
     """A badge key presented where a different upload purpose is expected."""
     return key.replace("credentials/badges/", "credentials/templates/")
+
+
+def test_bulk_manifest_delete_and_revoke(created_stages) -> None:
+    harness, storage, admin = _setup()
+    viewer = harness.login(staff(RoleCode.VIEWER), "admin")
+    team, _leader = harness.paid_team()
+    stage = _stage(harness, admin, created_stages)
+    badge = harness.client.post("/api/v1/admin/badges", headers=admin, json={
+        "stage_id": stage["id"], "name": "Builder", "image_key": _upload(harness, storage, admin, "BADGE", size=(600, 600))}).json()
+    certificate = harness.client.post("/api/v1/admin/certificate-types", headers=admin, json={
+        "stage_id": stage["id"], "name": "Participation", "background_key": _upload(harness, storage, admin, "TEMPLATE"),
+        "width": 1600, "height": 1131, "layout": LAYOUT}).json()
+    members = _member_ids(team["team_name"])
+    for target in ({"badge_definition_id": badge["id"]}, {"certificate_type_id": certificate["id"]}):
+        issued = harness.client.post("/api/v1/admin/credentials/issue", headers=admin, json={**target, "recipients": [{"member_id": m} for m in members]})
+        assert issued.json()["issued"] == 2, issued.text
+    assert harness.client.post("/api/v1/admin/credentials/publish", headers=admin, json={"badge_definition_id": badge["id"]}).json()["published"] == 2
+
+    # The manifest lists every match with file links, readable by viewers.
+    manifest = harness.client.get("/api/v1/admin/credentials/manifest", headers=viewer, params={"stage_id": stage["id"]})
+    assert manifest.status_code == 200, manifest.text
+    body = manifest.json()
+    assert body["total"] == 4 and not body["truncated"]
+    certificates = [item for item in body["items"] if item["kind"] == "CERTIFICATE"]
+    badges = [item for item in body["items"] if item["kind"] == "BADGE"]
+    assert all(item["pdf_url"] and item["image_url"] and item["status"] == "DRAFT" for item in certificates)
+    assert all(item["image_url"] and item["pdf_url"] is None and item["status"] == "PUBLISHED" for item in badges)
+    assert harness.client.get("/api/v1/admin/credentials/manifest", headers=viewer,
+                              params={"stage_id": stage["id"], "status": "DRAFT"}).json()["total"] == 2
+
+    every = [item["id"] for item in body["items"]]
+    assert harness.client.post("/api/v1/admin/credentials/bulk-delete", headers=viewer, json={"ids": every}).status_code == 403
+    deleted = harness.client.post("/api/v1/admin/credentials/bulk-delete", headers=admin, json={"ids": every})
+    assert deleted.status_code == 200 and deleted.json() == {"deleted": 2, "skipped": 2}, deleted.text
+    assert all(f"credentials/files/{item['code']}/v1.pdf" in storage.deleted for item in certificates)
+
+    assert harness.client.post("/api/v1/admin/credentials/bulk-revoke", headers=admin, json={"ids": every, "reason": "x"}).status_code == 422
+    revoked = harness.client.post("/api/v1/admin/credentials/bulk-revoke", headers=admin, json={"ids": every, "reason": "Wrong badge"})
+    assert revoked.status_code == 200 and revoked.json() == {"revoked": 2, "skipped": 2}, revoked.text
+    left = harness.client.get("/api/v1/admin/credentials/manifest", headers=admin, params={"stage_id": stage["id"]}).json()["items"]
+    assert {item["status"] for item in left} == {"REVOKED"} and len(left) == 2
+    assert harness.client.get(f"/api/v1/public/credentials/{badges[0]['code']}").json()["status"] == "REVOKED"

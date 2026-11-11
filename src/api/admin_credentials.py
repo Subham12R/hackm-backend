@@ -43,6 +43,8 @@ Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max
 LongText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)]
 Short = Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)]
 PAGE_SIZE = 100
+# Bulk actions and the "everything matching" manifest stop here; one event never issues more.
+MANIFEST_LIMIT = 5000
 
 
 class UploadRequest(BaseModel):
@@ -166,6 +168,14 @@ class CredentialUpdate(BaseModel):
 
 
 class RevokeRequest(BaseModel):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=500)]
+
+
+class BulkRequest(BaseModel):
+    ids: list[UUID] = Field(min_length=1, max_length=MANIFEST_LIMIT)
+
+
+class BulkRevokeRequest(BulkRequest):
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=500)]
 
 
@@ -467,6 +477,18 @@ def admin_credentials_router(public_key: Ed25519PublicKey) -> APIRouter:
                 draw_later(request, background)
             return {"issued": len(created), "skipped": skipped, "ids": [str(credential.id) for credential in created]}
 
+    def filtered(session: Session, stage_id, certificate_type_id, badge_definition_id, kind, status, q: str):
+        query = select(Credential).where(Credential.event_id == current_event(session).id)
+        for column, value in ((Credential.stage_id, stage_id), (Credential.certificate_type_id, certificate_type_id),
+                              (Credential.badge_definition_id, badge_definition_id), (Credential.kind, kind), (Credential.status, status)):
+            if value is not None:
+                query = query.where(column == value)
+        if q.strip():
+            like = f"%{q.strip()}%"
+            query = query.where(or_(Credential.recipient_name.ilike(like), Credential.recipient_email.ilike(like),
+                                     Credential.team_name.ilike(like), Credential.code.ilike(like)))
+        return query
+
     @router.get("/credentials")
     def list_credentials(
         request: Request,
@@ -481,15 +503,7 @@ def admin_credentials_router(public_key: Ed25519PublicKey) -> APIRouter:
     ):
         session, _user = authenticated_user(request, authorization, public_key, ADMIN_READ_ROLES)
         with session:
-            query = select(Credential).where(Credential.event_id == current_event(session).id)
-            for column, value in ((Credential.stage_id, stage_id), (Credential.certificate_type_id, certificate_type_id),
-                                  (Credential.badge_definition_id, badge_definition_id), (Credential.kind, kind), (Credential.status, status)):
-                if value is not None:
-                    query = query.where(column == value)
-            if q.strip():
-                like = f"%{q.strip()}%"
-                query = query.where(or_(Credential.recipient_name.ilike(like), Credential.recipient_email.ilike(like),
-                                         Credential.team_name.ilike(like), Credential.code.ilike(like)))
+            query = filtered(session, stage_id, certificate_type_id, badge_definition_id, kind, status, q)
             total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
             items = list(session.scalars(query.order_by(Credential.issued_at.desc(), Credential.team_name, Credential.recipient_name)
                                          .offset((page - 1) * PAGE_SIZE).limit(PAGE_SIZE)))
@@ -498,6 +512,31 @@ def admin_credentials_router(public_key: Ed25519PublicKey) -> APIRouter:
             bucket = request.app.state.storage
             return {"total": int(total), "page": page, "page_size": PAGE_SIZE,
                     "items": [service.admin_payload(credential, titles[credential.id], bucket, names) for credential in items]}
+
+    @router.get("/credentials/manifest")
+    def credential_manifest(
+        request: Request,
+        authorization: str = Header(),
+        stage_id: UUID | None = None,
+        certificate_type_id: UUID | None = None,
+        badge_definition_id: UUID | None = None,
+        kind: Literal["CERTIFICATE", "BADGE"] | None = None,
+        status: Literal["DRAFT", "PUBLISHED", "REVOKED"] | None = None,
+        q: str = Query("", max_length=200),
+    ):
+        """Every credential matching the list's filters in one compact page, for selecting across pages and bulk downloads."""
+        session, _user = authenticated_user(request, authorization, public_key, ADMIN_READ_ROLES)
+        with session:
+            query = filtered(session, stage_id, certificate_type_id, badge_definition_id, kind, status, q)
+            total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
+            items = list(session.scalars(query.order_by(Credential.team_name, Credential.recipient_name, Credential.code).limit(MANIFEST_LIMIT)))
+            titles = _titles(session, items)
+            bucket = request.app.state.storage
+            return {"total": int(total), "truncated": int(total) > len(items), "items": [{
+                "id": str(credential.id), "code": credential.code, "kind": credential.kind, "status": credential.status,
+                "render_status": credential.render_status, "title": titles[credential.id], "recipient_name": credential.recipient_name,
+                "team_name": credential.team_name, **service.file_urls(credential, bucket),
+            } for credential in items]}
 
     @router.post("/credentials/publish")
     def publish_credentials(payload: PublishRequest, request: Request, background: BackgroundTasks, authorization: str = Header()):
@@ -596,6 +635,51 @@ def admin_credentials_router(public_key: Ed25519PublicKey) -> APIRouter:
             for key in files:
                 if bucket is not None:
                     bucket.delete(key)
+
+    @router.post("/credentials/bulk-delete")
+    def bulk_delete_credentials(payload: BulkRequest, request: Request, authorization: str = Header()):
+        """Delete the drafts among the chosen credentials; anything already published is skipped (revoke it instead)."""
+        session, actor = authenticated_user(request, authorization, public_key, EVENT_CONTROL_ROLES)
+        with session:
+            event = current_event(session)
+            chosen = list(session.scalars(select(Credential).where(
+                Credential.event_id == event.id, Credential.id.in_(set(payload.ids))).with_for_update()))
+            drafts = [credential for credential in chosen if credential.status == "DRAFT"]
+            files = [key for credential in drafts for key in (credential.png_key, credential.pdf_key) if key and key.startswith("credentials/files/")]
+            if drafts:
+                audit(session, actor, "Deleted draft credentials", "event", event.id, count=len(drafts),
+                      codes=[credential.code for credential in drafts])
+            for credential in drafts:
+                session.delete(credential)
+            session.commit()
+            bucket = request.app.state.storage
+            if bucket is not None:
+                for key in files:
+                    bucket.delete(key)
+            return {"deleted": len(drafts), "skipped": len(set(payload.ids)) - len(drafts)}
+
+    @router.post("/credentials/bulk-revoke")
+    def bulk_revoke_credentials(payload: BulkRevokeRequest, request: Request, authorization: str = Header()):
+        """Revoke the published credentials among the chosen ones with one reason; drafts and revoked ones are skipped."""
+        session, actor = authenticated_user(request, authorization, public_key, EVENT_CONTROL_ROLES)
+        with session:
+            event = current_event(session)
+            chosen = list(session.scalars(select(Credential).where(
+                Credential.event_id == event.id, Credential.id.in_(set(payload.ids))).with_for_update()))
+            published = [credential for credential in chosen if credential.status == "PUBLISHED"]
+            now = datetime.now(UTC)
+            for credential in published:
+                credential.status, credential.revoked_at, credential.revoked_by_user_id = "REVOKED", now, actor.id
+                credential.revoked_reason = payload.reason
+            if published:
+                audit(session, actor, "Revoked credentials", "event", event.id, count=len(published), reason=payload.reason,
+                      codes=[credential.code for credential in published])
+            session.commit()
+            for registration_id in {credential.registration_id for credential in published}:
+                realtime.notify(request, realtime.team_channel(registration_id), realtime.message(
+                    "credentials", "Credentials were withdrawn", "Some of your team's certificates or badges were revoked.", "IMPORTANT",
+                    refresh=["credentials"]))
+            return {"revoked": len(published), "skipped": len(set(payload.ids)) - len(published)}
 
     return router
 
