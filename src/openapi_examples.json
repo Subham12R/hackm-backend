@@ -12293,7 +12293,7 @@
    },
    "409": {
     "example": {
-     "detail": "every decision has already been emailed"
+     "detail": "every decision has already been released"
     },
     "media_type": "application/json",
     "schema": {

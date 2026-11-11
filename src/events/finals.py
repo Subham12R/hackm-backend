@@ -38,13 +38,16 @@ def unreleased(session: Session, event_id) -> list[Registration]:
     ))
 
 
-def release(session: Session, event: Event, now: datetime) -> tuple[dict[str, int], list[tuple[str, str]]]:
-    """Email every decided team whose decision changed since it was last told; returns counts and (team id, decision) pairs."""
+def release(session: Session, event: Event, now: datetime, send_emails: bool = True) -> tuple[dict[str, int], list[tuple[str, str]]]:
+    """Release every decided team whose decision changed since it was last told; returns counts and (team id, decision) pairs.
+
+    With `send_emails` off the decisions go live on the dashboard (finals events, RSVP card) but nothing is mailed, for
+    organisers who tell teams another way. Leaders then RSVP from the dashboard only, since no one-click link was sent."""
     counts = {"ACCEPTED": 0, "DECLINED": 0, "emails": 0}
     released: list[tuple[str, str]] = []
     teams = unreleased(session, event.id)
     rosters: dict = {}
-    if teams:
+    if teams and send_emails:
         for member in session.scalars(
             select(RegistrationMember).where(RegistrationMember.registration_id.in_([team.id for team in teams]))
             .order_by(RegistrationMember.role.desc(), RegistrationMember.full_name)
@@ -54,8 +57,8 @@ def release(session: Session, event: Event, now: datetime) -> tuple[dict[str, in
         members = rosters.get(registration.id, [])
         token = None
         if registration.finals_status == "ACCEPTED":
-            token = token_urlsafe(32)
-            registration.rsvp_token_hash = rsvp_digest(token)
+            token = token_urlsafe(32) if send_emails else None
+            registration.rsvp_token_hash = rsvp_digest(token) if token else None
             registration.rsvp_status, registration.rsvp_at = "PENDING", None
         else:
             registration.rsvp_token_hash = None

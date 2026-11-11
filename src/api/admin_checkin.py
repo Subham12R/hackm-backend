@@ -38,6 +38,8 @@ class CheckinRequest(BaseModel):
 class ReleaseRequest(BaseModel):
     # Required the first time accepted teams are released; later releases may keep the existing one.
     rsvp_closes_at: datetime | None = None
+    # False: mark the decisions released (dashboards update) without emailing anyone.
+    send_emails: bool = True
 
 
 def admin_checkin_router(public_key: Ed25519PublicKey) -> APIRouter:
@@ -131,11 +133,15 @@ def admin_checkin_router(public_key: Ed25519PublicKey) -> APIRouter:
                 event.finals_rsvp_closes_at = payload.rsvp_closes_at
             pending = finals.unreleased(session, event.id)
             if not pending:
-                raise HTTPException(409, "every decision has already been emailed")
-            if any(team.finals_status == "ACCEPTED" for team in pending) and (event.finals_rsvp_closes_at is None or event.finals_rsvp_closes_at <= now):
+                raise HTTPException(409, "every decision has already been released")
+            # The acceptance email promises a deadline; without emails the dashboard RSVP stays open until one is set.
+            if payload.send_emails and any(team.finals_status == "ACCEPTED" for team in pending) and (
+                event.finals_rsvp_closes_at is None or event.finals_rsvp_closes_at <= now
+            ):
                 raise HTTPException(422, "set an RSVP deadline before releasing acceptances")
-            counts, released = finals.release(session, event, now)
-            audit(session, actor, "Released finals decisions", "event", event.id, accepted=counts["ACCEPTED"], rejected=counts["DECLINED"], emails=counts["emails"])
+            counts, released = finals.release(session, event, now, send_emails=payload.send_emails)
+            audit(session, actor, "Released finals decisions" if payload.send_emails else "Released finals decisions without email", "event", event.id,
+                  accepted=counts["ACCEPTED"], rejected=counts["DECLINED"], emails=counts["emails"])
             session.commit()
             request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             for registration_id, decision in released:
@@ -144,7 +150,8 @@ def admin_checkin_router(public_key: Ed25519PublicKey) -> APIRouter:
                     "Confirm your attendance on the dashboard." if decision == "ACCEPTED" else "Open the dashboard to read it.",
                     "IMPORTANT" if decision == "ACCEPTED" else "INFO", refresh=["dashboard", "stages"],
                 ))
-            background.add_task(dispatch_pending, request.app.state.database_url, request.app.state.email_sender, counts["emails"] + 10)
+            if counts["emails"]:
+                background.add_task(dispatch_pending, request.app.state.database_url, request.app.state.email_sender, counts["emails"] + 10)
             return {"released": {"ACCEPTED": counts["ACCEPTED"], "DECLINED": counts["DECLINED"]}, "emails": counts["emails"]}
 
     @router.get("/checkins")

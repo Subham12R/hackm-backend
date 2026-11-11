@@ -143,6 +143,17 @@ def test_finals_decisions_release_in_batches_with_rsvp() -> None:
         again = harness.client.post("/api/v1/admin/finals/release", headers=reviewer, json={})
         assert again.status_code == 200 and again.json()["released"]["ACCEPTED"] >= 1
 
+        # Organisers who tell teams another way release without email: dashboards update, nobody is mailed, RSVP works there.
+        quiet_payload, quiet_leader = harness.paid_team(team_name=f"Quiet {uuid4().hex[:6]}")
+        assert harness.client.post(f"/api/v1/admin/teams/{team_id(quiet_payload)}/finals", headers=reviewer, json={"status": "ACCEPTED"}).status_code == 200
+        before = len(harness.sink.messages)
+        quiet = harness.client.post("/api/v1/admin/finals/release", headers=reviewer, json={"send_emails": False})
+        assert quiet.status_code == 200 and quiet.json()["emails"] == 0 and quiet.json()["released"]["ACCEPTED"] >= 1
+        assert len(harness.sink.messages) == before
+        assert harness.client.get("/api/v1/participant/dashboard", headers=quiet_leader).json()["finals"]["status"] == "ACCEPTED"
+        assert harness.client.post("/api/v1/participant/rsvp", headers=quiet_leader, json={"answer": "CONFIRMED"}).json()["rsvp_status"] == "CONFIRMED"
+        assert harness.client.post("/api/v1/admin/finals/release", headers=reviewer, json={"send_emails": False}).status_code == 409
+
         with db() as session:
             session.execute(update(Event).where(Event.id == ACTIVE_EVENT_ID).values(finals_rsvp_closes_at=datetime.now(UTC) - timedelta(minutes=1)))
             session.commit()
