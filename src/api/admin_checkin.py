@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 
 from src import realtime
@@ -27,6 +27,10 @@ class FinalsRequest(BaseModel):
     status: Literal["PENDING", "ACCEPTED", "DECLINED"]
 
 
+class BulkFinalsRequest(FinalsRequest):
+    registration_ids: list[UUID] = Field(min_length=1, max_length=2000)
+
+
 class CheckinRequest(BaseModel):
     checked_in: bool
 
@@ -39,6 +43,24 @@ class ReleaseRequest(BaseModel):
 def admin_checkin_router(public_key: Ed25519PublicKey) -> APIRouter:
     router = APIRouter(prefix="/api/v1/admin", tags=["admin-checkin"])
 
+    def apply_finals(session, actor: User, registration: Registration, status: str) -> str | None:
+        """Set one team's finals decision; returns why it was skipped, or None when it applied."""
+        if status == "ACCEPTED" and registration.status != "PAID":
+            return "only paid teams can be accepted for the finals"
+        if status != "ACCEPTED" and session.scalar(
+            select(MemberCheckin.member_id).where(MemberCheckin.registration_id == registration.id).limit(1)
+        ):
+            return "undo this team's check-ins before removing it from the finals"
+        if registration.finals_status != status:
+            if registration.finals_status == "ACCEPTED":
+                # A withdrawn place also withdraws its RSVP; the team is told at the next release.
+                registration.rsvp_status, registration.rsvp_at, registration.rsvp_token_hash = "PENDING", None, None
+            registration.finals_status = status
+            registration.finals_decided_at = datetime.now(UTC)
+            registration.finals_decided_by_user_id = actor.id
+            audit(session, actor, "Finals selection updated", "registration", registration.id, status=status)
+        return None
+
     @router.post("/teams/{registration_id}/finals")
     def decide_finals(registration_id: UUID, payload: FinalsRequest, request: Request, authorization: str = Header()):
         session, actor = authenticated_user(request, authorization, public_key, TEAM_REVIEW_ROLES)
@@ -46,24 +68,35 @@ def admin_checkin_router(public_key: Ed25519PublicKey) -> APIRouter:
             registration = session.get(Registration, registration_id, with_for_update=True)
             if registration is None or registration.event_id != ACTIVE_EVENT_ID:
                 raise HTTPException(404, "team not found")
-            if payload.status == "ACCEPTED" and registration.status != "PAID":
-                raise HTTPException(409, "only paid teams can be accepted for the finals")
-            if payload.status != "ACCEPTED" and session.scalar(
-                select(MemberCheckin.member_id).where(MemberCheckin.registration_id == registration.id).limit(1)
-            ):
-                raise HTTPException(409, "undo this team's check-ins before removing it from the finals")
-            if registration.finals_status != payload.status:
-                if registration.finals_status == "ACCEPTED":
-                    # A withdrawn place also withdraws its RSVP; the team is told at the next release.
-                    registration.rsvp_status, registration.rsvp_at, registration.rsvp_token_hash = "PENDING", None, None
-                registration.finals_status = payload.status
-                registration.finals_decided_at = datetime.now(UTC)
-                registration.finals_decided_by_user_id = actor.id
-                audit(session, actor, "Finals selection updated", "registration", registration.id, status=payload.status)
+            before = registration.finals_status
+            if (problem := apply_finals(session, actor, registration, payload.status)) is not None:
+                raise HTTPException(409, problem)
+            if registration.finals_status != before:
                 session.commit()
                 request.app.state.cache.invalidate(ADMIN_AGGREGATES)
             decider = session.get(User, registration.finals_decided_by_user_id) if registration.finals_decided_by_user_id else None
             return {"finals": finals_payload(registration, decider.display_name if decider else None)}
+
+    @router.post("/teams/bulk-finals")
+    def bulk_decide_finals(payload: BulkFinalsRequest, request: Request, authorization: str = Header()):
+        """One finals decision for many teams; teams it cannot apply to are skipped and listed, the rest still change."""
+        session, actor = authenticated_user(request, authorization, public_key, TEAM_REVIEW_ROLES)
+        with session:
+            teams = list(session.scalars(select(Registration).where(
+                Registration.event_id == ACTIVE_EVENT_ID, Registration.id.in_(set(payload.registration_ids))
+            ).order_by(Registration.team_name).with_for_update()))
+            changed, skipped = 0, []
+            for registration in teams:
+                before = registration.finals_status
+                problem = apply_finals(session, actor, registration, payload.status)
+                if problem:
+                    skipped.append({"registration_id": str(registration.id), "team_name": registration.team_name, "reason": problem})
+                elif registration.finals_status != before:
+                    changed += 1
+            session.commit()
+            if changed:
+                request.app.state.cache.invalidate(ADMIN_AGGREGATES)
+            return {"changed": changed, "unchanged": len(teams) - changed - len(skipped), "skipped": skipped}
 
     @router.get("/finals")
     def finals_overview(request: Request, authorization: str = Header()):

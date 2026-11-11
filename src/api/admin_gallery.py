@@ -1,6 +1,6 @@
 import re
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -37,6 +37,11 @@ class PhotoCreate(BaseModel):
 class PhotoUpdate(BaseModel):
     caption: Caption | None = None
     published: bool | None = None
+
+
+class BulkPhotosRequest(BaseModel):
+    ids: list[UUID] = Field(min_length=1, max_length=1000)
+    action: Literal["show", "hide", "delete"]
 
 
 def admin_gallery_router(public_key: Ed25519PublicKey) -> APIRouter:
@@ -110,6 +115,33 @@ def admin_gallery_router(public_key: Ed25519PublicKey) -> APIRouter:
             session.commit()
             request.app.state.cache.invalidate(PUBLIC_GALLERY)
             return {**photo_payload(photo, bucket), "uploaded_by": actor.display_name}
+
+    @router.post("/bulk")
+    def bulk_photos(payload: BulkPhotosRequest, request: Request, authorization: str = Header()):
+        """Show, hide or delete many photos at once."""
+        session, actor = authenticated_user(request, authorization, public_key, EVENT_CONTROL_ROLES)
+        with session:
+            photos = list(session.scalars(select(GalleryPhoto).where(
+                GalleryPhoto.event_id == ACTIVE_EVENT_ID, GalleryPhoto.id.in_(set(payload.ids))).with_for_update()))
+            if payload.action == "delete":
+                bucket = storage(request)
+                for photo in photos:
+                    # As for one photo: the object goes first, so a failure leaves a visible, retryable row.
+                    bucket.delete(photo.object_key)
+                    session.delete(photo)
+                changed = len(photos)
+            else:
+                published = payload.action == "show"
+                targets = [photo for photo in photos if photo.published != published]
+                for photo in targets:
+                    photo.published = published
+                changed = len(targets)
+            if changed:
+                audit(session, actor, f"Gallery photos {'deleted' if payload.action == 'delete' else 'shown' if payload.action == 'show' else 'hidden'}",
+                      "event", ACTIVE_EVENT_ID, count=changed)
+                session.commit()
+                request.app.state.cache.invalidate(PUBLIC_GALLERY)
+            return {"changed": changed}
 
     @router.patch("/{photo_id}")
     def update_photo(photo_id: UUID, payload: PhotoUpdate, request: Request, authorization: str = Header()):
