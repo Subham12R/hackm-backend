@@ -160,7 +160,8 @@ def test_home_page_domains_send_titles_only_after_the_release(created) -> None:
     assert before["event"] == stage["name"] and before["released"] is False and before["count"] == 2
     assert before["tracks"] == [] and before["release_at"] == stage["statements"]["release_at"]
     # Nothing of the titles or briefs is in the response before the release time.
-    assert "Cybersecurity" not in str(before) and "Brief" not in str(before)
+    assert "Cybersecurity" not in str(before) and "Brief" not in str(before) and "Gemini" not in str(before)
+    assert before["has_overall_track"] is True
 
     with db() as session:
         session.get(Stage, stage["id"]).statements_release_at = datetime.now(UTC) - timedelta(minutes=1)

@@ -82,11 +82,13 @@ def statements_released(stage: Stage, now: datetime) -> bool:
 def home_domains_payload(stage: Stage | None, tracks: list[Track], now: datetime) -> dict:
     """The public home page's Domains: titles only, and none of them before the release time."""
     if stage is None:
-        return {"now": now.isoformat(), "event": None, "release_at": None, "released": False, "overall_track": "", "count": 0, "tracks": []}
+        return {"now": now.isoformat(), "event": None, "release_at": None, "released": False, "overall_track": "", "has_overall_track": False,
+                "count": 0, "tracks": []}
     released = statements_released(stage, now)
     return {
         "now": now.isoformat(), "event": stage.name, "release_at": _iso(stage.statements_release_at), "released": released,
-        "overall_track": stage.overall_track or "", "count": len(tracks),
+        # The overall track is held back with the titles; before the release only its existence is known.
+        "overall_track": (stage.overall_track or "") if released else "", "has_overall_track": bool(stage.overall_track), "count": len(tracks),
         "tracks": [{"position": index + 1, "title": track.title} for index, track in enumerate(tracks)] if released else [],
     }
 
