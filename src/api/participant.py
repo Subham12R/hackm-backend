@@ -55,6 +55,7 @@ from src.submissions.codes import new_anonymous_code
 
 
 TRACK_LOCKED = "your problem statement is locked; ask the organisers to change it"
+EXTERNAL_ONLY = "this event collects projects through the organisers' form linked on your dashboard"
 
 
 def _link(value: str, *, github: bool = False) -> str:
@@ -718,6 +719,8 @@ def _choose_track(session: Session, request: Request, user: User, registration: 
 
 def _save_submission(session: Session, request: Request, registration: Registration, stage: Stage, payload: SubmissionRequest) -> dict:
     now = datetime.now(UTC)
+    if submission_form.external_replaces(stage):
+        raise HTTPException(409, EXTERNAL_ONLY)
     if _team_state(session, registration, stage, now) == "CLOSED":
         raise HTTPException(403, "submission is closed")
     _require_clock(session, registration, stage, now)
@@ -755,6 +758,8 @@ def _save_submission(session: Session, request: Request, registration: Registrat
 
 
 def _finalize_submission(session: Session, request: Request, user: User, registration: Registration, stage: Stage) -> dict:
+    if submission_form.external_replaces(stage):
+        raise HTTPException(409, EXTERNAL_ONLY)
     state = _team_state(session, registration, stage, datetime.now(UTC))
     if state == "NOT_OPEN":
         raise HTTPException(403, "submission is not open yet")

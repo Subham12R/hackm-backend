@@ -111,6 +111,11 @@ class SubmissionFormRequest(BaseModel):
     fields: list[dict] = Field(min_length=1, max_length=80)
 
 
+class ExternalFormRequest(BaseModel):
+    # {"enabled": bool, "url": "https://...", "mode": "replace" | "alongside"}; validated in src/submissions/form.py.
+    external: dict
+
+
 def _answered_keys(session, stage_id) -> set[str]:
     keys: set[str] = set()
     for answers in session.scalars(select(Submission.answers).where(Submission.stage_id == stage_id)):
@@ -120,9 +125,19 @@ def _answered_keys(session, stage_id) -> set[str]:
 
 def _form_admin_payload(session, stage: Stage) -> dict:
     submitted = session.scalar(select(func.count(Submission.id)).where(Submission.stage_id == stage.id, Submission.status == "SUBMITTED")) or 0
-    return {"stage_id": str(stage.id), "customized": bool(stage.submission_form), "fields": submission_form.fields(stage),
+    return {"stage_id": str(stage.id), "customized": submission_form.customized(stage), "fields": submission_form.fields(stage),
             "submitted": int(submitted), "answered_keys": sorted(_answered_keys(session, stage.id)),
-            "defaults": submission_form.default_fields()}
+            "defaults": submission_form.default_fields(), "external": submission_form.stored_external(stage)}
+
+
+def _store_form(stage: Stage, fields: list[dict] | None, external: dict | None) -> None:
+    """Write the form JSON; NULL when both parts are back to their defaults (the built-in form, no outside form)."""
+    value = {}
+    if fields:
+        value["fields"] = fields
+    if external and (external["enabled"] or external["url"]):
+        value["external"] = external
+    stage.submission_form = value or None
 
 
 def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
@@ -144,10 +159,28 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
                 fields = submission_form.validate_config(payload.fields, submission_form.fields(stage), _answered_keys(session, stage.id))
             except submission_form.FormError as error:
                 raise HTTPException(422, str(error)) from None
-            stage.submission_form = {"fields": fields}
+            _store_form(stage, fields, (stage.submission_form or {}).get("external"))
             stage.updated_at, stage.updated_by_user_id = datetime.now(UTC), actor.id
             audit(session, actor, "Updated submission form", "stage", stage.id, event=stage.name,
                   fields=", ".join(item["key"] for item in fields if item.get("enabled", True) and not item.get("archived")))
+            session.commit()
+            request.app.state.cache.invalidate(PUBLIC_EVENT, ADMIN_AGGREGATES)
+            return _form_admin_payload(session, stage)
+
+    @router.put("/stages/{stage_id}/submission-form/external")
+    def put_external_form(stage_id: UUID, payload: ExternalFormRequest, request: Request, authorization: str = Header()):
+        """Point teams at an outside form (Google Forms, Tally, ...), instead of or next to the built-in form."""
+        session, actor = authenticated_user(request, authorization, public_key, EVENT_CONTROL_ROLES)
+        with session:
+            stage = stage_rules.get_stage(session, stage_id, current_event(session).id, lock=True)
+            try:
+                external = submission_form.validate_external(payload.external)
+            except submission_form.FormError as error:
+                raise HTTPException(422, str(error)) from None
+            _store_form(stage, (stage.submission_form or {}).get("fields"), external)
+            stage.updated_at, stage.updated_by_user_id = datetime.now(UTC), actor.id
+            audit(session, actor, "Updated external submission form", "stage", stage.id, event=stage.name,
+                  enabled=external["enabled"], mode=external["mode"], url=external["url"])
             session.commit()
             request.app.state.cache.invalidate(PUBLIC_EVENT, ADMIN_AGGREGATES)
             return _form_admin_payload(session, stage)
@@ -161,7 +194,8 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
             custom = {item["key"] for item in submission_form.fields(stage) if not item.get("builtin")}
             if custom & _answered_keys(session, stage.id):
                 raise HTTPException(409, "teams have answered custom fields; remove the fields you don't need instead")
-            stage.submission_form = None
+            # The outside form link is a separate setting; resetting the fields keeps it.
+            _store_form(stage, None, (stage.submission_form or {}).get("external"))
             audit(session, actor, "Reset submission form", "stage", stage.id, event=stage.name)
             session.commit()
             return _form_admin_payload(session, stage)

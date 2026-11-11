@@ -7,11 +7,15 @@ shows, what it is called and whether it is required. Custom answers live in `sub
 
 A removed custom field is archived, not deleted, so the answers already given are kept (and still
 exported); it is hidden from participants and judges.
+
+An event can also point teams at an outside form (Google Forms, Tally, ...), stored next to the fields as
+`submission_form["external"] = {"enabled", "url", "mode"}`. Mode "replace" shows only that form and turns off the
+built-in one; "alongside" shows it under the built-in form, for extra details.
 """
 
 import math
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 BUILTIN_TYPES = {
     "project_name": "short_text",
@@ -54,6 +58,59 @@ def default_fields() -> list[dict]:
     ]
 
 
+EXTERNAL_MODES = ("replace", "alongside")
+EXTERNAL_URL_MAX = 1000
+
+
+def default_external() -> dict:
+    return {"enabled": False, "url": "", "mode": "replace"}
+
+
+def stored_external(stage) -> dict:
+    """The admin's external form settings, kept while it is switched off so turning it back on keeps the link."""
+    stored = (stage.submission_form or {}).get("external") if stage is not None else None
+    return {**default_external(), **stored} if stored else default_external()
+
+
+def external(stage) -> dict | None:
+    """The outside form teams see, or None when the event uses only its own form."""
+    config = stored_external(stage)
+    if not config["enabled"] or not config["url"]:
+        return None
+    return {"url": config["url"], "embed_url": embed_url(config["url"]), "mode": config["mode"]}
+
+
+def external_replaces(stage) -> bool:
+    found = external(stage)
+    return found is not None and found["mode"] == "replace"
+
+
+def embed_url(url: str) -> str:
+    """Google Forms only renders inside a frame with `embedded=true`; other providers take the share link as is."""
+    parsed = urlparse(url)
+    if parsed.hostname == "docs.google.com" and parsed.path.startswith("/forms/"):
+        path = re.sub(r"/(edit|prefill)$", "/viewform", parsed.path)
+        query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "embedded"]
+        return urlunparse(parsed._replace(path=path, query=urlencode([*query, ("embedded", "true")])))
+    return url
+
+
+def validate_external(raw) -> dict:
+    if not isinstance(raw, dict):
+        raise FormError("external form settings must be an object")
+    enabled = bool(raw.get("enabled", False))
+    mode = raw.get("mode", "replace")
+    if mode not in EXTERNAL_MODES:
+        raise FormError(f"external form mode must be one of {', '.join(EXTERNAL_MODES)}")
+    url = _text(raw.get("url"), "External form link", EXTERNAL_URL_MAX, required=enabled)
+    if url:
+        parsed = urlparse(url)
+        # https only: the site is served over https and would refuse to frame a plain http page.
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise FormError("External form link: enter a full https:// link")
+    return {"enabled": enabled, "url": url, "mode": mode}
+
+
 def fields(stage) -> list[dict]:
     """Every field of the stage's form in order, archived custom fields included."""
     stored = (stage.submission_form or {}).get("fields") if stage is not None else None
@@ -66,7 +123,11 @@ def active(stage) -> list[dict]:
 
 
 def form_payload(stage) -> dict:
-    return {"fields": [_public(item) for item in active(stage)], "customized": bool(stage is not None and stage.submission_form)}
+    return {"fields": [_public(item) for item in active(stage)], "customized": customized(stage), "external": external(stage)}
+
+
+def customized(stage) -> bool:
+    return bool(stage is not None and (stage.submission_form or {}).get("fields"))
 
 
 def _public(item: dict) -> dict:
