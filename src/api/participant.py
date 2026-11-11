@@ -661,20 +661,33 @@ def _team_state(session: Session, registration: Registration, stage: Stage, now:
     return stage_rules.submission_state(stage, now, _extra(_submission_for(session, registration.id, stage.id)))
 
 
+def _started_at(stage: Stage, submission: Submission | None, now: datetime) -> datetime | None:
+    """When this team's clock started (for OPEN timers, the event's open time once reached)."""
+    return stage_rules.clock_started_at(stage, submission.started_at if submission is not None else None, now)
+
+
 def _statements_visible(stage: Stage, submission: Submission | None, now: datetime) -> bool:
-    """Released statements, and in a timed event only once this team has started its clock."""
+    """Released statements, and in a timed event only once this team's clock is running.
+    In select mode every statement is visible from the start so the leader can pick one."""
+    if stage_rules.is_select(stage):
+        return True
     if not stage_rules.statements_released(stage, now):
         return False
-    return not stage_rules.is_timed(stage) or (submission is not None and submission.started_at is not None)
+    return not stage_rules.is_timed(stage) or _started_at(stage, submission, now) is not None
 
 
-def _require_clock(session: Session, registration: Registration, stage: Stage, now: datetime) -> None:
-    """In a timed event, work needs a started clock that has not run out."""
+def _require_clock(session: Session, registration: Registration, stage: Stage, now: datetime, allow_unstarted: bool = False) -> None:
+    """In a timed event, work needs a started clock that has not run out.
+    `allow_unstarted` lets a select-mode team pick its statement before its clock runs."""
     if not stage_rules.is_timed(stage):
         return
     submission = _submission_for(session, registration.id, stage.id, lock=True)
-    started = submission.started_at if submission is not None else None
+    started = _started_at(stage, submission, now)
     if started is None:
+        if allow_unstarted:
+            return
+        if stage_rules.clock_starts_at_open(stage):
+            raise HTTPException(409, "the event's clock has not started yet; it starts when submissions open")
         raise HTTPException(409, "start the event's timer first; the problem statements open when you do")
     # The event closing is caught earlier ("submission is closed"); this is the team's own limit running out.
     if now >= stage_rules.personal_deadline(stage, started, _extra(submission)):
@@ -699,7 +712,7 @@ def _choose_track(session: Session, request: Request, user: User, registration: 
     now = datetime.now(UTC)
     if _team_state(session, registration, stage, now) == "CLOSED":
         raise HTTPException(403, "submission is closed")
-    _require_clock(session, registration, stage, now)
+    _require_clock(session, registration, stage, now, allow_unstarted=stage_rules.is_select(stage))
     track = _stage_track(session, stage, track_id, now)
     existing = _submission_for(session, registration.id, stage.id, lock=True)
     if existing is not None and existing.track_locked_at is not None:
@@ -812,8 +825,10 @@ def _stage_payload(session: Session, stage: Stage, submission: Submission | None
         "submission_window": stage_rules.window_payload(stage, now, extra),
         "statements": {"release_at": stage.statements_release_at.isoformat() if stage.statements_release_at else None,
                        "released": released, "count": len(rows),
+                       # REVEAL: statements unlock at release_at. SELECT: all are visible and the leader picks one.
+                       "mode": stage.statement_mode,
                        # Timed events: statements are out, but this team opens them by starting its clock.
-                       "requires_start": released and not visible},
+                       "requires_start": released and not visible and not stage_rules.clock_starts_at_open(stage)},
         "timer": stage_rules.timer_payload(stage, started_at, now, extra),
         # Problem statements stay server-side until the reveal time (and, in a timed event, until the team starts).
         "tracks": [{**stage_rules.track_payload(track), "resources": protected_resources.participant_resources(track.resources)}

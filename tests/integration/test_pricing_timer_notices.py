@@ -182,7 +182,7 @@ def timed_stage():
 def _timed(harness: Harness, admin: dict, created: list, **overrides) -> dict:
     now = datetime.now(UTC)
     body = {"name": f"Online sprint {len(created)}", "eligibility": "ALL_PAID", "published": True, "time_limit_minutes": 48 * 60,
-            "submission_opens_at": (now - timedelta(hours=1)).isoformat(), "submission_closes_at": (now + timedelta(hours=30)).isoformat(),
+            "submission_opens_at": (now - timedelta(hours=20)).isoformat(), "submission_closes_at": (now + timedelta(hours=30)).isoformat(),
             "statements_release_at": (now - timedelta(minutes=5)).isoformat(), **overrides}
     stage = harness.client.post("/api/v1/admin/stages", headers=admin, json=body)
     assert stage.status_code == 201, stage.text

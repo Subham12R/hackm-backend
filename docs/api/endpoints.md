@@ -8,7 +8,7 @@ Auth: `public` needs nothing; otherwise send `Authorization: Bearer <access_toke
 the listed roles. `staff (not JUDGE)` is SUPER_ADMIN, EVENT_ADMIN, REGISTRATION_ADMIN, EVALUATION_ADMIN,
 SUPPORT_ADMIN and VIEWER. `PARTICIPANT` means the team leader's account.
 
-191 operations.
+197 operations.
 
 | Group | Operations |
 |---|---|
@@ -19,15 +19,15 @@ SUPPORT_ADMIN and VIEWER. `PARTICIPANT` means the team leader's account.
 | [auth](#auth) | 11 |
 | [participant](#participant) | 21 |
 | [judge](#judge) | 4 |
-| [admin](#admin) | 12 |
+| [admin](#admin) | 13 |
 | [admin-payments](#admin-payments) | 14 |
 | [admin-event](#admin-event) | 10 |
 | [admin-stages](#admin-stages) | 14 |
 | [admin-judging](#admin-judging) | 20 |
-| [admin-checkin](#admin-checkin) | 6 |
-| [admin-credentials](#admin-credentials) | 20 |
+| [admin-checkin](#admin-checkin) | 7 |
+| [admin-credentials](#admin-credentials) | 23 |
 | [admin-ops](#admin-ops) | 9 |
-| [admin-gallery](#admin-gallery) | 5 |
+| [admin-gallery](#admin-gallery) | 6 |
 | [admin-team-invites](#admin-team-invites) | 3 |
 | [admin-site-notices](#admin-site-notices) | 5 |
 | [admin-email-campaigns](#admin-email-campaigns) | 12 |
@@ -146,6 +146,7 @@ Organiser read models: overview, registrations, teams, submissions, evaluations 
 | `GET` | `/api/v1/admin/teams` `?date&category&status&search&finals&review&page&page_size` | staff (not JUDGE) |  | 200 |
 | `GET` | `/api/v1/admin/teams/ids` `?date&category&status&search&finals&review` | staff (not JUDGE) |  | 200 |
 | `POST` | `/api/v1/admin/teams/{registration_id}/review` | SUPER_ADMIN, EVENT_ADMIN, REGISTRATION_ADMIN | TeamReviewRequest | 200 |
+| `POST` | `/api/v1/admin/teams/bulk-review` | SUPER_ADMIN, EVENT_ADMIN, REGISTRATION_ADMIN | BulkTeamReviewRequest | 200 |
 | `GET` | `/api/v1/admin/evaluators` | staff (not JUDGE) |  | 200 |
 | `GET` | `/api/v1/admin/submissions` `?stage_id&track_id&search` | staff (not JUDGE) |  | 200 |
 | `POST` | `/api/v1/admin/submissions/{registration_id}/assign` `?stage_id` | SUPER_ADMIN, EVENT_ADMIN, EVALUATION_ADMIN | AssignRequest | 200 |
@@ -168,7 +169,7 @@ Registration detail, payment review, refunds, cancellation and roster edits by s
 | `DELETE` | `/api/v1/admin/teams/{registration_id}/members/{member_id}` | SUPER_ADMIN, EVENT_ADMIN, REGISTRATION_ADMIN |  | 200 |
 | `POST` | `/api/v1/admin/teams/{registration_id}/leader` | SUPER_ADMIN, EVENT_ADMIN, REGISTRATION_ADMIN | LeaderRequest | 200 |
 | `POST` | `/api/v1/admin/registrations/{registration_id}/cancel` | SUPER_ADMIN, EVENT_ADMIN, REGISTRATION_ADMIN |  | 200 |
-| `POST` | `/api/v1/admin/registrations/bulk` | SUPER_ADMIN | BulkRequest | 200 |
+| `POST` | `/api/v1/admin/registrations/bulk` | SUPER_ADMIN | src__api__admin_payments__BulkRequest | 200 |
 | `POST` | `/api/v1/admin/registrations/{registration_id}/reject` | SUPER_ADMIN | RejectRequest | 200 |
 | `POST` | `/api/v1/admin/payments/{attempt_id}/accept` | SUPER_ADMIN |  | 200 |
 | `POST` | `/api/v1/admin/payments/{attempt_id}/dismiss` | SUPER_ADMIN | DismissRequest | 200 |
@@ -246,6 +247,7 @@ Finals acceptance and venue check-ins.
 | Method | Path | Auth | Body | Success |
 |---|---|---|---|---|
 | `POST` | `/api/v1/admin/teams/{registration_id}/finals` | SUPER_ADMIN, EVENT_ADMIN, REGISTRATION_ADMIN | FinalsRequest | 200 |
+| `POST` | `/api/v1/admin/teams/bulk-finals` | SUPER_ADMIN, EVENT_ADMIN, REGISTRATION_ADMIN | BulkFinalsRequest | 200 |
 | `GET` | `/api/v1/admin/finals` | staff (not JUDGE) |  | 200 |
 | `POST` | `/api/v1/admin/finals/release` | SUPER_ADMIN, EVENT_ADMIN, REGISTRATION_ADMIN | ReleaseRequest | 200 |
 | `GET` | `/api/v1/admin/checkins` `?search` | staff (not JUDGE) |  | 200 |
@@ -274,10 +276,13 @@ Certificates, badges and their templates.
 | `POST` | `/api/v1/admin/credentials/candidates` | staff (not JUDGE) | CandidatesRequest | 200 |
 | `POST` | `/api/v1/admin/credentials/issue` | SUPER_ADMIN, EVENT_ADMIN | IssueRequest | 201 |
 | `GET` | `/api/v1/admin/credentials` `?stage_id&certificate_type_id&badge_definition_id&kind&status&q&page` | staff (not JUDGE) |  | 200 |
+| `GET` | `/api/v1/admin/credentials/manifest` `?stage_id&certificate_type_id&badge_definition_id&kind&status&q` | staff (not JUDGE) |  | 200 |
 | `POST` | `/api/v1/admin/credentials/publish` | SUPER_ADMIN, EVENT_ADMIN | PublishRequest | 200 |
 | `PATCH` | `/api/v1/admin/credentials/{credential_id}` | SUPER_ADMIN, EVENT_ADMIN | CredentialUpdate | 200 |
 | `DELETE` | `/api/v1/admin/credentials/{credential_id}` | SUPER_ADMIN, EVENT_ADMIN |  | 204 |
 | `POST` | `/api/v1/admin/credentials/{credential_id}/revoke` | SUPER_ADMIN, EVENT_ADMIN | RevokeRequest | 200 |
+| `POST` | `/api/v1/admin/credentials/bulk-delete` | SUPER_ADMIN, EVENT_ADMIN | src__api__admin_credentials__BulkRequest | 200 |
+| `POST` | `/api/v1/admin/credentials/bulk-revoke` | SUPER_ADMIN, EVENT_ADMIN | BulkRevokeRequest | 200 |
 
 ## admin-ops
 
@@ -304,6 +309,7 @@ Photo gallery uploads (presigned to S3 or R2).
 | `GET` | `/api/v1/admin/gallery` | staff (not JUDGE) |  | 200 |
 | `POST` | `/api/v1/admin/gallery` | SUPER_ADMIN, EVENT_ADMIN | PhotoCreate | 201 |
 | `POST` | `/api/v1/admin/gallery/uploads` | SUPER_ADMIN, EVENT_ADMIN | src__api__admin_gallery__UploadRequest | 201 |
+| `POST` | `/api/v1/admin/gallery/bulk` | SUPER_ADMIN, EVENT_ADMIN | BulkPhotosRequest | 200 |
 | `PATCH` | `/api/v1/admin/gallery/{photo_id}` | SUPER_ADMIN, EVENT_ADMIN | PhotoUpdate | 200 |
 | `DELETE` | `/api/v1/admin/gallery/{photo_id}` | SUPER_ADMIN, EVENT_ADMIN |  | 204 |
 
