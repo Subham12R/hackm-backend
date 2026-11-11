@@ -45,6 +45,8 @@ class StageRequest(BaseModel):
     time_limit_minutes: TimeLimit | None = None
     statement_mode: Literal["REVEAL", "SELECT"] = "REVEAL"
     timer_start: Literal["REVEAL", "OPEN"] = "REVEAL"
+    show_on_home: bool = False
+    overall_track: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] = ""
 
     @model_validator(mode="after")
     def timezone_aware(self):
@@ -67,6 +69,8 @@ class StageUpdate(BaseModel):
     time_limit_minutes: TimeLimit | None = None
     statement_mode: Literal["REVEAL", "SELECT"] | None = None
     timer_start: Literal["REVEAL", "OPEN"] | None = None
+    show_on_home: bool | None = None
+    overall_track: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None = None
 
     @model_validator(mode="after")
     def timezone_aware(self):
@@ -241,6 +245,7 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
             _ensure_order(stage)
             session.add(stage)
             session.flush()
+            _single_home(session, stage)
             audit(session, actor, "Created event stage", "stage", stage.id, name=stage.name, eligibility=stage.eligibility)
             session.commit()
             request.app.state.cache.invalidate(PUBLIC_EVENT, ADMIN_AGGREGATES)
@@ -261,6 +266,7 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
                     changes[field] = value.isoformat() if isinstance(value, datetime) else value
                     setattr(stage, field, value)
             _ensure_order(stage)
+            _single_home(session, stage)
             if changes:
                 stage.updated_at, stage.updated_by_user_id = datetime.now(UTC), actor.id
                 audit(session, actor, "Updated event stage", "stage", stage.id, event=stage.name, **changes)
@@ -509,6 +515,13 @@ def _team_track_payload(submission: Submission | None, track: Track | None) -> d
     }
 
 
+def _single_home(session, stage: Stage) -> None:
+    """Only one event feeds the home page's Domains; choosing one clears the others."""
+    if stage.show_on_home:
+        for other in session.scalars(select(Stage).where(Stage.event_id == stage.event_id, Stage.id != stage.id, Stage.show_on_home)):
+            other.show_on_home = False
+
+
 def _ensure_order(stage: Stage) -> None:
     if stage.submission_opens_at and stage.submission_closes_at and stage.submission_opens_at >= stage.submission_closes_at:
         raise HTTPException(422, "submissions must open before they close")
@@ -529,6 +542,7 @@ def _stage_payload(session, stage: Stage, now: datetime) -> dict:
         "statements": {"release_at": stage.statements_release_at.isoformat() if stage.statements_release_at else None,
                        "released": stage_rules.statements_released(stage, now)},
         "statement_mode": stage.statement_mode, "timer_start": stage.timer_start,
+        "show_on_home": stage.show_on_home, "overall_track": stage.overall_track,
         "time_limit_minutes": stage.time_limit_minutes,
         # With an OPEN timer every team's clock starts together, so there is no per-team start to count.
         "started": 0 if stage_rules.clock_starts_at_open(stage) else int(session.scalar(select(func.count(Submission.id)).where(Submission.stage_id == stage.id, Submission.started_at.is_not(None))) or 0)

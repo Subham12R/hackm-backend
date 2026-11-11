@@ -49,15 +49,15 @@ def test_new_events_default_to_reveal_mode(created) -> None:
     assert view["statements"]["mode"] == "REVEAL" and view["statements"]["released"] is False and view["tracks"] == []
 
 
-def test_select_mode_shows_every_statement_and_the_leader_picks_one_before_the_start(created) -> None:
+def test_select_mode_shows_every_statement_and_the_leader_picks_one(created) -> None:
     harness = Harness()
     admin = harness.login(staff(RoleCode.EVENT_ADMIN), "admin")
-    stage = _stage(harness, admin, created, statement_mode="SELECT")
+    # With no release time, selectable statements are out from the start.
+    stage = _stage(harness, admin, created, statement_mode="SELECT", statements_release_at=None)
     _payload, leader = harness.paid_team()
     url = f"/api/v1/participant/stages/{stage['id']}"
 
     view = _view(harness, leader, stage["id"])
-    # No reveal: all three statements are out even though the release time is hours away.
     assert view["statements"]["mode"] == "SELECT" and view["statements"]["released"] is True and view["statements"]["requires_start"] is False
     assert [track["title"] for track in view["tracks"]] == ["Campus safety", "Water", "Health"]
 
@@ -68,10 +68,21 @@ def test_select_mode_shows_every_statement_and_the_leader_picks_one_before_the_s
     # The pick is locked; only organisers can change it.
     assert harness.client.post(f"{url}/track", headers=leader, json={"track_id": view["tracks"][0]["id"]}).status_code == 409
 
-    # Switching back to reveal mode hides the statements again until the release time.
+    # Switching back to reveal mode with no release time hides them again.
     hidden = harness.client.patch(f"/api/v1/admin/stages/{stage['id']}", headers=admin, json={"statement_mode": "REVEAL"})
     assert hidden.status_code == 200 and hidden.json()["statement_mode"] == "REVEAL"
     assert _view(harness, leader, stage["id"])["tracks"] == []
+
+
+def test_select_mode_with_a_release_time_keeps_every_statement_hidden_until_then(created) -> None:
+    harness = Harness()
+    admin = harness.login(staff(RoleCode.EVENT_ADMIN), "admin")
+    stage = _stage(harness, admin, created, statement_mode="SELECT")
+    _payload, leader = harness.paid_team()
+    view = _view(harness, leader, stage["id"])
+    assert view["statements"]["released"] is False and view["tracks"] == []
+    refused = harness.client.post(f"/api/v1/participant/stages/{stage['id']}/track", headers=leader, json={"track_id": stage["id"]})
+    assert refused.status_code == 422
 
 
 def test_select_mode_in_a_timed_event_lets_the_team_pick_before_its_clock_runs(created) -> None:
@@ -79,7 +90,7 @@ def test_select_mode_in_a_timed_event_lets_the_team_pick_before_its_clock_runs(c
     admin = harness.login(staff(RoleCode.EVENT_ADMIN), "admin")
     now = datetime.now(UTC)
     stage = _stage(harness, admin, created, statement_mode="SELECT", time_limit_minutes=120,
-                   submission_opens_at=(now - timedelta(minutes=5)).isoformat())
+                   submission_opens_at=(now - timedelta(minutes=5)).isoformat(), statements_release_at=(now - timedelta(minutes=5)).isoformat())
     _payload, leader = harness.paid_team()
     url = f"/api/v1/participant/stages/{stage['id']}"
     view = _view(harness, leader, stage["id"])
@@ -138,3 +149,29 @@ def test_a_time_limit_cannot_be_longer_than_the_event(created) -> None:
     shorter = harness.client.patch(f"/api/v1/admin/stages/{stage['id']}", headers=admin,
                                    json={"submission_closes_at": (now + timedelta(hours=8)).isoformat()})
     assert shorter.status_code == 422
+
+
+def test_home_page_domains_send_titles_only_after_the_release(created) -> None:
+    harness = Harness()
+    admin = harness.login(staff(RoleCode.EVENT_ADMIN), "admin")
+    stage = _stage(harness, admin, created, titles=("AI & Intelligent Systems", "Cybersecurity & Digital Trust"), statement_mode="SELECT",
+                   show_on_home=True, overall_track="MLH Partner Track: Build with Gemini")
+    before = harness.client.get("/api/v1/public/domains").json()
+    assert before["event"] == stage["name"] and before["released"] is False and before["count"] == 2
+    assert before["tracks"] == [] and before["release_at"] == stage["statements"]["release_at"]
+    # Nothing of the titles or briefs is in the response before the release time.
+    assert "Cybersecurity" not in str(before) and "Brief" not in str(before)
+
+    with db() as session:
+        session.get(Stage, stage["id"]).statements_release_at = datetime.now(UTC) - timedelta(minutes=1)
+        session.commit()
+    after = harness.client.get("/api/v1/public/domains").json()
+    assert after["released"] is True and after["overall_track"] == "MLH Partner Track: Build with Gemini"
+    assert after["tracks"] == [{"position": 1, "title": "AI & Intelligent Systems"}, {"position": 2, "title": "Cybersecurity & Digital Trust"}]
+    assert "Brief" not in str(after)
+
+    # Choosing another event for the home page clears this one.
+    other = _stage(harness, admin, created, titles=("Water",), show_on_home=True)
+    assert harness.client.get("/api/v1/public/domains").json()["event"] == other["name"]
+    listed = {item["id"]: item for item in harness.client.get("/api/v1/admin/stages", headers=admin).json()["items"]}
+    assert listed[stage["id"]]["show_on_home"] is False and listed[other["id"]]["show_on_home"] is True
