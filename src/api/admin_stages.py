@@ -217,10 +217,6 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
             paid = session.scalar(select(func.count(Registration.id)).where(Registration.event_id == event.id, Registration.status == "PAID")) or 0
             finalists = session.scalar(select(func.count(Registration.id)).where(
                 Registration.event_id == event.id, Registration.status == "PAID", Registration.finals_status == "ACCEPTED")) or 0
-            # Accepted but not emailed yet: finalists-only events stay hidden from these teams until decisions are sent.
-            unreleased = session.scalar(select(func.count(Registration.id)).where(
-                Registration.event_id == event.id, Registration.status == "PAID", Registration.finals_status == "ACCEPTED",
-                Registration.finals_notified_status.is_distinct_from("ACCEPTED"))) or 0
             counts: dict = {}
             for stage_id, status, count in session.execute(
                 select(Submission.stage_id, Submission.status, func.count(Submission.id)).group_by(Submission.stage_id, Submission.status)
@@ -233,7 +229,6 @@ def admin_stages_router(public_key: Ed25519PublicKey) -> APIRouter:
                 items.append({
                     **_stage_payload(session, stage, now),
                     "teams": int(finalists if stage.eligibility == "FINALISTS" else paid),
-                    "teams_not_notified": int(unreleased if stage.eligibility == "FINALISTS" else 0),
                     "drafts": stage_counts.get("DRAFT", 0), "submitted": stage_counts.get("SUBMITTED", 0),
                     "awards": int(awards.get(stage.id, 0)),
                 })
