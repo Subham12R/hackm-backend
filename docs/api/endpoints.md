@@ -8,7 +8,7 @@ Auth: `public` needs nothing; otherwise send `Authorization: Bearer <access_toke
 the listed roles. `staff (not JUDGE)` is SUPER_ADMIN, EVENT_ADMIN, REGISTRATION_ADMIN, EVALUATION_ADMIN,
 SUPPORT_ADMIN and VIEWER. `PARTICIPANT` means the team leader's account.
 
-198 operations.
+199 operations.
 
 | Group | Operations |
 |---|---|
