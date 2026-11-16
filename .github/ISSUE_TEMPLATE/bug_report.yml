@@ -1,0 +1,28 @@
+name: Bug report
+description: Something in the API is broken
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The request you sent (method, path, body) or the script you ran. Remove tokens and personal data.
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: Python and PostgreSQL versions, how you run it (uv, Docker), and the commit you ran.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or response body
+      description: Remove tokens, emails, and any participant or payment data first.

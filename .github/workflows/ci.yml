@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: hackm_test
+          POSTGRES_PASSWORD: hackm_test
+          POSTGRES_DB: hackm_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U hackm_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen
+      - run: uv run pytest
+
+      - name: Production install still imports
+        run: |
+          uv sync --frozen --no-dev
+          uv run --no-sync python -c "import src.main"

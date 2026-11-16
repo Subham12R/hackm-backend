@@ -1,5 +1,8 @@
 # HackMatrix backend
 
+[![CI](https://github.com/Subham12R/hackm-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/Subham12R/hackm-backend/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 FastAPI and PostgreSQL API behind HackMatrix 2026. It owns identity, registration pricing, Razorpay payment
 confirmation, leader activation, events and submissions, judging, certificates, and every admin read model.
 
@@ -241,3 +244,13 @@ src.main"` will.
 - [`docs/api/README.md`](docs/api/README.md) for building on the API, including troubleshooting
 - `CONTEXT.md` for domain terms and invariants
 - `docs/PRD.md` for the product contract
+
+## Contributing
+
+Bug reports and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first, and follow the
+[Code of Conduct](CODE_OF_CONDUCT.md). Report security problems privately, as described in
+[SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE) © 2026 Subham Karmakar.
